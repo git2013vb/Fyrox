@@ -306,9 +306,7 @@ impl MachineDefinition {
                             blend_pose.pose_source = node_map
                                 .get(&blend_pose_definition.pose_source)
                                 .cloned()
-                                .expect(
-                                    "There must be a respective pose node for blend pose source!",
-                                );
+                                .unwrap_or_default();
                         }
                     } else {
                         unreachable!()
@@ -326,7 +324,7 @@ impl MachineDefinition {
                             input.pose_source = node_map
                                 .get(&input_definition.pose_source)
                                 .cloned()
-                                .expect("There must be a respective pose node for indexed input!");
+                                .unwrap_or_default();
                         }
                     } else {
                         unreachable!()
@@ -365,6 +363,13 @@ impl MachineDefinition {
                 transition_definition.rule.as_str(),
             ));
         }
+
+        machine.set_entry_state(
+            state_map
+                .get(&self.entry_state)
+                .cloned()
+                .unwrap_or_default(),
+        );
 
         Ok(scene.animation_machines.add(machine))
     }
