@@ -1,7 +1,7 @@
 use crate::{
     animation::{
         machine::{
-            node::{BasePoseNodeDefinition, PoseNodeDefinition},
+            node::{BasePoseNode, BasePoseNodeDefinition, PoseNodeDefinition},
             EvaluatePose, Parameter, ParameterContainer, PoseNode, PoseWeight,
         },
         AnimationContainer, AnimationPose,
@@ -70,9 +70,24 @@ impl BlendPose {
 /// recover from his wounds.
 #[derive(Default, Debug, Visit, Clone)]
 pub struct BlendAnimations {
+    pub base: BasePoseNode,
     pub pose_sources: Vec<BlendPose>,
     #[visit(skip)]
-    output_pose: RefCell<AnimationPose>,
+    pub(crate) output_pose: RefCell<AnimationPose>,
+}
+
+impl Deref for BlendAnimations {
+    type Target = BasePoseNode;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl DerefMut for BlendAnimations {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.base
+    }
 }
 
 #[derive(Default, Debug, Visit, Clone, Inspect)]
@@ -105,6 +120,7 @@ impl BlendAnimations {
     /// Creates new animation blend node with given poses.
     pub fn new(poses: Vec<BlendPose>) -> Self {
         Self {
+            base: Default::default(),
             pose_sources: poses,
             output_pose: Default::default(),
         }
@@ -132,11 +148,14 @@ impl EvaluatePose for BlendAnimations {
                 }
             };
 
-            let pose_source =
-                nodes[blend_pose.pose_source].eval_pose(nodes, params, animations, dt);
-            self.output_pose
-                .borrow_mut()
-                .blend_with(&pose_source, weight);
+            if let Some(pose_source) = nodes
+                .try_borrow(blend_pose.pose_source)
+                .map(|pose_source| pose_source.eval_pose(nodes, params, animations, dt))
+            {
+                self.output_pose
+                    .borrow_mut()
+                    .blend_with(&pose_source, weight);
+            }
         }
         self.output_pose.borrow()
     }
@@ -161,12 +180,27 @@ pub struct IndexedBlendInputDefinition {
 
 #[derive(Default, Debug, Visit, Clone)]
 pub struct BlendAnimationsByIndex {
-    index_parameter: String,
+    pub base: BasePoseNode,
+    pub(crate) index_parameter: String,
     pub inputs: Vec<IndexedBlendInput>,
-    prev_index: Cell<Option<u32>>,
-    blend_time: Cell<f32>,
+    pub(crate) prev_index: Cell<Option<u32>>,
+    pub(crate) blend_time: Cell<f32>,
     #[visit(skip)]
-    output_pose: RefCell<AnimationPose>,
+    pub(crate) output_pose: RefCell<AnimationPose>,
+}
+
+impl Deref for BlendAnimationsByIndex {
+    type Target = BasePoseNode;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl DerefMut for BlendAnimationsByIndex {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.base
+    }
 }
 
 #[derive(Default, Debug, Visit, Clone, Inspect)]
@@ -199,6 +233,7 @@ impl DerefMut for BlendAnimationsByIndexDefinition {
 impl BlendAnimationsByIndex {
     pub fn new(index_parameter: String, inputs: Vec<IndexedBlendInput>) -> Self {
         Self {
+            base: Default::default(),
             index_parameter,
             inputs,
             output_pose: RefCell::new(Default::default()),
@@ -223,41 +258,46 @@ impl EvaluatePose for BlendAnimationsByIndex {
 
             if let Some(prev_index) = self.prev_index.get() {
                 if prev_index != current_index {
-                    let prev_input = &self.inputs[prev_index as usize];
-                    let current_input = &self.inputs[current_index as usize];
+                    if let (Some(prev_input), Some(current_input)) = (
+                        self.inputs.get(prev_index as usize),
+                        self.inputs.get(current_index as usize),
+                    ) {
+                        self.blend_time
+                            .set((self.blend_time.get() + dt).min(current_input.blend_time));
 
-                    self.blend_time
-                        .set((self.blend_time.get() + dt).min(current_input.blend_time));
+                        let interpolator = self.blend_time.get() / current_input.blend_time;
 
-                    let interpolator = self.blend_time.get() / current_input.blend_time;
+                        self.output_pose.borrow_mut().blend_with(
+                            &nodes[prev_input.pose_source].eval_pose(nodes, params, animations, dt),
+                            1.0 - interpolator,
+                        );
+                        self.output_pose.borrow_mut().blend_with(
+                            &nodes[current_input.pose_source]
+                                .eval_pose(nodes, params, animations, dt),
+                            interpolator,
+                        );
 
-                    self.output_pose.borrow_mut().blend_with(
-                        &nodes[prev_input.pose_source].eval_pose(nodes, params, animations, dt),
-                        1.0 - interpolator,
-                    );
-                    self.output_pose.borrow_mut().blend_with(
-                        &nodes[current_input.pose_source].eval_pose(nodes, params, animations, dt),
-                        interpolator,
-                    );
+                        if interpolator >= 1.0 {
+                            self.prev_index.set(Some(current_index));
+                            self.blend_time.set(0.0);
+                        }
 
-                    if interpolator >= 1.0 {
-                        self.prev_index.set(Some(current_index));
-                        self.blend_time.set(0.0);
+                        applied = true;
                     }
-
-                    applied = true;
                 }
             } else {
                 self.prev_index.set(Some(current_index));
             }
 
             if !applied {
-                // Immediately jump to target pose.
+                // Immediately jump to target pose (if any).
                 self.blend_time.set(0.0);
 
-                nodes[self.inputs[current_index as usize].pose_source]
-                    .eval_pose(nodes, params, animations, dt)
-                    .clone_into(&mut *self.output_pose.borrow_mut());
+                if let Some(current_input) = self.inputs.get(current_index as usize) {
+                    nodes[current_input.pose_source]
+                        .eval_pose(nodes, params, animations, dt)
+                        .clone_into(&mut *self.output_pose.borrow_mut());
+                }
             }
         }
 

@@ -4,7 +4,7 @@ use crate::{
     utils::{create_file_selector, open_file_selector},
 };
 use fyrox::{
-    animation::machine::{Machine, MachineDefinition},
+    animation::machine::Machine,
     core::{futures::executor::block_on, pool::Handle},
     engine::Engine,
     gui::{
@@ -15,15 +15,18 @@ use fyrox::{
         window::{WindowBuilder, WindowTitle},
         Thickness, UiNode,
     },
+    resource::absm::AbsmResource,
+    scene::Scene,
 };
 use std::path::Path;
 
 pub struct Previewer {
     pub window: Handle<UiNode>,
-    pub panel: PreviewPanel,
+    panel: PreviewPanel,
     load_preview_model: Handle<UiNode>,
     load_dialog: Handle<UiNode>,
     current_absm: Handle<Machine>,
+    current_resource: Option<AbsmResource>,
 }
 
 impl Previewer {
@@ -54,6 +57,7 @@ impl Previewer {
             load_preview_model,
             load_dialog,
             current_absm: Default::default(),
+            current_resource: None,
         }
     }
 
@@ -80,10 +84,15 @@ impl Previewer {
         self.panel.update(engine)
     }
 
-    pub fn set_absm(&mut self, engine: &mut Engine, definition: &MachineDefinition) {
+    pub fn clear(&mut self, engine: &mut Engine) {
+        self.remove_current_absm(engine);
+
+        self.panel.clear(engine);
+    }
+
+    fn remove_current_absm(&mut self, engine: &mut Engine) {
         let scene = &mut engine.scenes[self.panel.scene()];
 
-        // Remove previous machine first (if any).
         if scene
             .animation_machines
             .try_get(self.current_absm)
@@ -93,25 +102,49 @@ impl Previewer {
                 .animation_machines
                 .remove_with_animations(self.current_absm, &mut scene.animations);
         }
-
-        // Instantiate new immediately.
-        self.current_absm = block_on(definition.instantiate(
-            self.panel.model(),
-            scene,
-            engine.resource_manager.clone(),
-        ))
-        .unwrap();
     }
 
-    pub fn set_preview_model(
-        &mut self,
-        engine: &mut Engine,
-        path: &Path,
-        definition: &MachineDefinition,
-    ) {
+    pub fn set_absm(&mut self, engine: &mut Engine, resource: &AbsmResource) {
+        if self
+            .current_resource
+            .as_ref()
+            .map_or(false, |current_resource| current_resource == resource)
+        {
+            /*
+            // Just sync instance to resource.
+            if let Some(machine_instance) = scene.animation_machines.try_get_mut(self.current_absm)
+            {
+                machine_instance.resolve();
+            }*/
+            block_on(engine.scenes[self.panel.scene()].resolve(engine.resource_manager.clone()));
+        } else {
+            self.current_resource = Some(resource.clone());
+
+            // Remove previous machine first (if any).
+            self.remove_current_absm(engine);
+
+            // Instantiate new immediately.
+            self.current_absm = block_on(resource.instantiate(
+                self.panel.model(),
+                &mut engine.scenes[self.panel.scene()],
+                engine.resource_manager.clone(),
+            ))
+            .unwrap();
+        }
+    }
+
+    pub fn set_preview_model(&mut self, engine: &mut Engine, path: &Path, resource: &AbsmResource) {
         // TODO: Implement async loading for this.
         if block_on(self.panel.load_model(path, engine)) {
-            self.set_absm(engine, definition)
+            self.set_absm(engine, resource)
         }
+    }
+
+    pub fn current_absm(&self) -> Handle<Machine> {
+        self.current_absm
+    }
+
+    pub fn scene(&self) -> Handle<Scene> {
+        self.panel.scene()
     }
 }

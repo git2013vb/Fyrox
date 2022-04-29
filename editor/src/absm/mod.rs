@@ -8,8 +8,9 @@ use crate::{
         menu::Menu,
         message::{AbsmMessage, MessageSender},
         node::{AbsmNode, AbsmNodeMessage},
+        parameter::ParameterPanel,
         preview::Previewer,
-        state_graph::Document,
+        state_graph::StateGraphViewer,
         state_viewer::StateViewer,
     },
     utils::{create_file_selector, open_file_selector},
@@ -23,8 +24,9 @@ use fyrox::{
         },
         state::StateDefinition,
         transition::TransitionDefinition,
-        MachineDefinition,
+        Event, MachineDefinition,
     },
+    asset::{Resource, ResourceState},
     core::{
         color::Color,
         futures::executor::block_on,
@@ -36,11 +38,12 @@ use fyrox::{
         dock::{DockingManagerBuilder, TileBuilder, TileContent},
         file_browser::{FileBrowserMode, FileSelectorMessage},
         grid::{Column, GridBuilder, Row},
-        message::UiMessage,
+        message::{MessageDirection, UiMessage},
         widget::WidgetBuilder,
-        window::{WindowBuilder, WindowTitle},
+        window::{WindowBuilder, WindowMessage, WindowTitle},
         UiNode, UserInterface,
     },
+    resource::absm::{AbsmResource, AbsmResourceState},
     utils::log::Log,
 };
 use std::{
@@ -55,6 +58,7 @@ mod inspector;
 mod menu;
 mod message;
 mod node;
+mod parameter;
 mod preview;
 mod segment;
 mod selectable;
@@ -81,21 +85,35 @@ pub struct AbsmDataModel {
     path: PathBuf,
     preview_model_path: PathBuf,
     selection: Vec<SelectedEntity>,
-    absm_definition: MachineDefinition,
+    resource: AbsmResource,
 }
 
 impl AbsmDataModel {
     pub fn ctx(&mut self) -> AbsmEditorContext {
         AbsmEditorContext {
             selection: &mut self.selection,
-            definition: &mut self.absm_definition,
+            resource: self.resource.data_ref(),
         }
     }
 
     // Manual implementation is needed to store editor data alongside the engine data.
     fn visit(&mut self, visitor: &mut Visitor) -> VisitResult {
         // Visit engine data first.
-        self.absm_definition.visit("Machine", visitor)?;
+        if visitor.is_reading() {
+            let mut definition = MachineDefinition::default();
+            definition.visit("Machine", visitor)?;
+
+            self.resource =
+                AbsmResource::from(Resource::new(ResourceState::Ok(AbsmResourceState {
+                    path: Default::default(),
+                    absm_definition: definition,
+                })));
+        } else {
+            self.resource
+                .data_ref()
+                .absm_definition
+                .visit("Machine", visitor)?;
+        }
 
         // Visit editor-specific data. These fields are optional so we ignore any errors here.
         let _ = self.preview_model_path.visit("PreviewModelPath", visitor);
@@ -105,19 +123,19 @@ impl AbsmDataModel {
 }
 
 pub struct AbsmEditor {
-    #[allow(dead_code)] // TODO
     window: Handle<UiNode>,
     command_stack: AbsmCommandStack,
     data_model: Option<AbsmDataModel>,
     message_sender: MessageSender,
     message_receiver: Receiver<AbsmMessage>,
     inspector: Inspector,
-    document: Document,
+    state_graph_viewer: StateGraphViewer,
     save_dialog: Handle<UiNode>,
     load_dialog: Handle<UiNode>,
     previewer: Previewer,
     state_viewer: StateViewer,
     menu: Menu,
+    parameter_panel: ParameterPanel,
 }
 
 impl AbsmEditor {
@@ -131,9 +149,10 @@ impl AbsmEditor {
 
         let menu = Menu::new(ctx);
 
-        let inspector = Inspector::new(ctx, sender);
-        let document = Document::new(ctx);
+        let inspector = Inspector::new(ctx, sender.clone());
+        let state_graph_viewer = StateGraphViewer::new(ctx);
         let state_viewer = StateViewer::new(ctx);
+        let parameter_panel = ParameterPanel::new(ctx, sender);
 
         let docking_manager = DockingManagerBuilder::new(
             WidgetBuilder::new().on_row(1).with_child(
@@ -146,7 +165,21 @@ impl AbsmEditor {
                                     splitter: 0.3,
                                     tiles: [
                                         TileBuilder::new(WidgetBuilder::new())
-                                            .with_content(TileContent::Window(previewer.window))
+                                            .with_content(TileContent::VerticalTiles {
+                                                splitter: 0.5,
+                                                tiles: [
+                                                    TileBuilder::new(WidgetBuilder::new())
+                                                        .with_content(TileContent::Window(
+                                                            previewer.window,
+                                                        ))
+                                                        .build(ctx),
+                                                    TileBuilder::new(WidgetBuilder::new())
+                                                        .with_content(TileContent::Window(
+                                                            parameter_panel.window,
+                                                        ))
+                                                        .build(ctx),
+                                                ],
+                                            })
                                             .build(ctx),
                                         TileBuilder::new(WidgetBuilder::new())
                                             .with_content(TileContent::HorizontalTiles {
@@ -154,7 +187,7 @@ impl AbsmEditor {
                                                 tiles: [
                                                     TileBuilder::new(WidgetBuilder::new())
                                                         .with_content(TileContent::Window(
-                                                            document.window,
+                                                            state_graph_viewer.window,
                                                         ))
                                                         .build(ctx),
                                                     TileBuilder::new(WidgetBuilder::new())
@@ -179,6 +212,7 @@ impl AbsmEditor {
         .build(ctx);
 
         let window = WindowBuilder::new(WidgetBuilder::new().with_width(1600.0).with_height(800.0))
+            .open(false)
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new()
@@ -209,23 +243,24 @@ impl AbsmEditor {
             command_stack: AbsmCommandStack::new(false),
             data_model: None,
             menu,
-            document,
+            state_graph_viewer,
             inspector,
             save_dialog,
             load_dialog,
             previewer,
             state_viewer,
+            parameter_panel,
         }
     }
 
     fn sync_to_model(&mut self, engine: &mut Engine) {
         if let Some(data_model) = self.data_model.as_ref() {
             let ui = &mut engine.user_interface;
-            self.document.sync_to_model(data_model, ui);
-            self.state_viewer
-                .sync_to_model(&data_model.absm_definition, ui, data_model);
+            self.parameter_panel.sync_to_model(ui, data_model);
+            self.state_graph_viewer.sync_to_model(data_model, ui);
+            self.state_viewer.sync_to_model(ui, data_model);
             self.inspector.sync_to_model(ui, data_model);
-            self.previewer.set_absm(engine, &data_model.absm_definition);
+            self.previewer.set_absm(engine, &data_model.resource);
         }
     }
 
@@ -266,14 +301,31 @@ impl AbsmEditor {
         }
     }
 
-    fn create_new_absm(&mut self, engine: &mut Engine) {
+    fn set_data_model(&mut self, engine: &mut Engine, data_model: Option<AbsmDataModel>) {
         self.clear_command_stack();
 
-        let data_model = AbsmDataModel::default();
-        self.state_viewer
-            .set_state(Handle::NONE, &data_model, &engine.user_interface);
-        self.data_model = Some(data_model);
-        self.previewer.panel.clear(engine);
+        self.data_model = data_model;
+
+        if let Some(data_model) = self.data_model.as_ref() {
+            self.parameter_panel
+                .reset(&mut engine.user_interface, Some(data_model));
+            self.previewer.set_preview_model(
+                engine,
+                &data_model.preview_model_path,
+                &data_model.resource,
+            );
+            self.sync_to_model(engine);
+        } else {
+            self.state_graph_viewer.clear(&engine.user_interface);
+            self.state_viewer.clear(&engine.user_interface);
+            self.previewer.clear(engine);
+            self.parameter_panel.reset(&mut engine.user_interface, None);
+            self.inspector.clear(&engine.user_interface);
+        }
+    }
+
+    fn create_new_absm(&mut self, engine: &mut Engine) {
+        self.set_data_model(engine, Some(AbsmDataModel::default()));
     }
 
     fn open_save_dialog(&self, ui: &UserInterface) {
@@ -297,7 +349,7 @@ impl AbsmEditor {
     fn set_preview_model(&mut self, engine: &mut Engine, path: &Path) {
         if let Some(data_model) = self.data_model.as_mut() {
             self.previewer
-                .set_preview_model(engine, path, &data_model.absm_definition);
+                .set_preview_model(engine, path, &data_model.resource);
 
             data_model.preview_model_path = path.to_path_buf();
         }
@@ -315,10 +367,7 @@ impl AbsmEditor {
                     ));
                 } else {
                     data_model.path = path.to_path_buf();
-                    let preview_model_path = data_model.preview_model_path.clone();
-                    self.data_model = Some(data_model);
-                    self.message_sender.sync();
-                    self.set_preview_model(engine, &preview_model_path);
+                    self.set_data_model(engine, Some(data_model));
                 }
             }
             Err(e) => Log::err(format!(
@@ -327,6 +376,14 @@ impl AbsmEditor {
                 e
             )),
         };
+    }
+
+    pub fn open(&self, ui: &UserInterface) {
+        ui.send_message(WindowMessage::open(
+            self.window,
+            MessageDirection::ToWidget,
+            true,
+        ));
     }
 
     pub fn update(&mut self, engine: &mut Engine) {
@@ -346,10 +403,7 @@ impl AbsmEditor {
                 AbsmMessage::ClearCommandStack => {
                     need_sync |= self.clear_command_stack();
                 }
-                AbsmMessage::CreateNewAbsm => {
-                    self.create_new_absm(engine);
-                    need_sync = true;
-                }
+                AbsmMessage::CreateNewAbsm => self.create_new_absm(engine),
                 AbsmMessage::LoadAbsm => {
                     self.open_load_dialog(&engine.user_interface);
                 }
@@ -375,6 +429,34 @@ impl AbsmEditor {
         }
 
         self.previewer.update(engine);
+
+        self.handle_machine_events(engine);
+    }
+
+    pub fn handle_machine_events(&self, engine: &mut Engine) {
+        let scene = &mut engine.scenes[self.previewer.scene()];
+
+        if let Some(machine) = scene
+            .animation_machines
+            .try_get_mut(self.previewer.current_absm())
+        {
+            while let Some(event) = machine.pop_event() {
+                match event {
+                    Event::ActiveStateChanged(_) => {
+                        // TODO
+                    }
+                    Event::ActiveTransitionChanged(transition) => {
+                        if let Some(transition_ref) = machine.transitions().try_borrow(transition) {
+                            self.state_graph_viewer.activate_transition(
+                                &mut engine.user_interface,
+                                transition_ref.definition,
+                            );
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        }
     }
 
     pub fn handle_ui_message(&mut self, message: &UiMessage, engine: &mut Engine) {
@@ -387,10 +469,16 @@ impl AbsmEditor {
         if let Some(data_model) = self.data_model.as_ref() {
             self.state_viewer
                 .handle_ui_message(message, ui, &self.message_sender, data_model);
-            self.document
-                .handle_ui_message(message, ui, &self.message_sender, data_model);
+            self.state_graph_viewer.handle_ui_message(
+                message,
+                ui,
+                &self.message_sender,
+                data_model,
+            );
             self.inspector
                 .handle_ui_message(message, data_model, &self.message_sender);
+            self.parameter_panel
+                .handle_ui_message(message, &self.message_sender);
         }
 
         if let Some(FileSelectorMessage::Commit(path)) = message.data() {
@@ -398,6 +486,11 @@ impl AbsmEditor {
                 self.save_current_absm(path.clone())
             } else if message.destination() == self.load_dialog {
                 self.load_absm(path, engine);
+            }
+        } else if let Some(WindowMessage::Close) = message.data() {
+            if message.destination() == self.window {
+                // Clear on close.
+                self.set_data_model(engine, None);
             }
         } else if let Some(msg) = message.data::<AbsmNodeMessage>() {
             if let Some(data_model) = self.data_model.as_ref() {
@@ -417,7 +510,8 @@ impl AbsmEditor {
                             .node(message.destination())
                             .query_component::<AbsmNode<PoseNodeDefinition>>()
                         {
-                            let model_ref = &data_model.absm_definition.nodes[node.model_handle];
+                            let model_ref = &data_model.resource.data_ref().absm_definition.nodes
+                                [node.model_handle];
 
                             match model_ref {
                                 PoseNodeDefinition::PlayAnimation(_) => {

@@ -5,9 +5,11 @@ use crate::{
                 AddInputCommand, AddPoseSourceCommand, RemoveInputCommand, RemovePoseSourceCommand,
                 SetBlendAnimationsByIndexInputBlendTimeCommand,
                 SetBlendAnimationsByIndexParameterCommand, SetBlendAnimationsPoseWeightCommand,
+                SetPoseWeightConstantCommand, SetPoseWeightParameterCommand,
             },
             AbsmCommand, CommandGroup, MovePoseNodeCommand, MoveStateNodeCommand,
-            SetPlayAnimationResourceCommand, SetStateNameCommand,
+            SetPlayAnimationResourceCommand, SetStateNameCommand, SetTransitionInvertRuleCommand,
+            SetTransitionNameCommand, SetTransitionRuleCommand, SetTransitionTimeCommand,
         },
         message::MessageSender,
         AbsmDataModel, SelectedEntity,
@@ -26,7 +28,8 @@ use fyrox::{
             BasePoseNodeDefinition, PoseNodeDefinition,
         },
         state::StateDefinition,
-        PoseWeight,
+        transition::TransitionDefinition,
+        MachineDefinition, PoseWeight,
     },
     core::{inspect::Inspect, pool::Handle},
     gui::{
@@ -88,25 +91,36 @@ impl Inspector {
         }
     }
 
-    fn first_selected_entity<'a>(&self, data_model: &'a AbsmDataModel) -> Option<&'a dyn Inspect> {
+    fn first_selected_entity<'a>(
+        &self,
+        definition: &'a MachineDefinition,
+    ) -> Option<&'a dyn Inspect> {
         self.selection.first().map(|first| match first {
             SelectedEntity::Transition(transition) => {
-                &data_model.absm_definition.transitions[*transition] as &dyn Inspect
+                &definition.transitions[*transition] as &dyn Inspect
             }
-            SelectedEntity::State(state) => {
-                &data_model.absm_definition.states[*state] as &dyn Inspect
-            }
-            SelectedEntity::PoseNode(pose) => {
-                &data_model.absm_definition.nodes[*pose] as &dyn Inspect
-            }
+            SelectedEntity::State(state) => &definition.states[*state] as &dyn Inspect,
+            SelectedEntity::PoseNode(pose) => &definition.nodes[*pose] as &dyn Inspect,
         })
     }
 
+    pub fn clear(&mut self, ui: &UserInterface) {
+        self.selection.clear();
+
+        ui.send_message(InspectorMessage::context(
+            self.inspector,
+            MessageDirection::ToWidget,
+            Default::default(),
+        ));
+    }
+
     pub fn sync_to_model(&mut self, ui: &mut UserInterface, data_model: &AbsmDataModel) {
+        let guard = data_model.resource.data_ref();
+
         if self.selection != data_model.selection {
             self.selection = data_model.selection.clone();
 
-            if let Some(obj_ref) = self.first_selected_entity(data_model) {
+            if let Some(obj_ref) = self.first_selected_entity(&guard.absm_definition) {
                 let ctx = InspectorContext::from_object(
                     obj_ref,
                     &mut ui.build_ctx(),
@@ -122,7 +136,7 @@ impl Inspector {
                     ctx,
                 ));
             }
-        } else if let Some(obj_ref) = self.first_selected_entity(data_model) {
+        } else if let Some(obj_ref) = self.first_selected_entity(&guard.absm_definition) {
             let ctx = ui
                 .node(self.inspector)
                 .cast::<fyrox::gui::inspector::Inspector>()
@@ -154,14 +168,17 @@ impl Inspector {
                     .selection
                     .iter()
                     .filter_map(|entry| match entry {
-                        SelectedEntity::Transition(_transition) => None, // TODO
+                        SelectedEntity::Transition(transition) => {
+                            handle_transition_property_changed(args, *transition)
+                        }
                         SelectedEntity::State(state) => handle_state_property_changed(
                             args,
                             *state,
-                            &data_model.absm_definition.states[*state],
+                            &data_model.resource.data_ref().absm_definition.states[*state],
                         ),
                         SelectedEntity::PoseNode(pose_node) => {
-                            let node = &data_model.absm_definition.nodes[*pose_node];
+                            let node =
+                                &data_model.resource.data_ref().absm_definition.nodes[*pose_node];
                             if args.owner_type_id == TypeId::of::<PlayAnimationDefinition>() {
                                 handle_play_animation_node_property_changed(args, *pose_node, node)
                             } else if args.owner_type_id
@@ -190,6 +207,38 @@ impl Inspector {
                 }
             }
         }
+    }
+}
+
+fn handle_transition_property_changed(
+    args: &PropertyChanged,
+    handle: Handle<TransitionDefinition>,
+) -> Option<AbsmCommand> {
+    match args.value {
+        FieldKind::Object(ref value) => match args.name.as_ref() {
+            TransitionDefinition::NAME => Some(AbsmCommand::new(SetTransitionNameCommand {
+                handle,
+                value: value.cast_clone()?,
+            })),
+            TransitionDefinition::RULE => Some(AbsmCommand::new(SetTransitionRuleCommand {
+                handle,
+                value: value.cast_clone()?,
+            })),
+            TransitionDefinition::TRANSITION_TIME => {
+                Some(AbsmCommand::new(SetTransitionTimeCommand {
+                    handle,
+                    value: value.cast_clone()?,
+                }))
+            }
+            TransitionDefinition::INVERT_RULE => {
+                Some(AbsmCommand::new(SetTransitionInvertRuleCommand {
+                    handle,
+                    value: value.cast_clone()?,
+                }))
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -292,6 +341,7 @@ fn handle_blend_animations_by_index_node_property_changed(
     }
 }
 
+#[allow(clippy::manual_map)]
 fn handle_blend_animations_node_property_changed(
     args: &PropertyChanged,
     handle: Handle<PoseNodeDefinition>,
@@ -325,6 +375,29 @@ fn handle_blend_animations_node_property_changed(
                                 value: value.cast_clone()?,
                             }))
                         }
+                        _ => None,
+                    },
+                    FieldKind::Inspectable(ref inner) => match inner.name.as_ref() {
+                        "0" => match inner.value {
+                            FieldKind::Object(ref value) => {
+                                if let Some(constant) = value.cast_clone::<f32>() {
+                                    Some(AbsmCommand::new(SetPoseWeightConstantCommand {
+                                        handle,
+                                        value: constant,
+                                        index,
+                                    }))
+                                } else if let Some(parameter) = value.cast_clone::<String>() {
+                                    Some(AbsmCommand::new(SetPoseWeightParameterCommand {
+                                        handle,
+                                        value: parameter,
+                                        index,
+                                    }))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        },
                         _ => None,
                     },
                     _ => None,

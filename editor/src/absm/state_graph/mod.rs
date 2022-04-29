@@ -8,7 +8,7 @@ use crate::{
         message::MessageSender,
         node::{AbsmNode, AbsmNodeBuilder, AbsmNodeMessage},
         state_graph::context::{CanvasContextMenu, NodeContextMenu, TransitionContextMenu},
-        transition::{Transition, TransitionBuilder},
+        transition::{Transition, TransitionBuilder, TransitionMessage},
         AbsmDataModel, SelectedEntity, NORMAL_BACKGROUND, NORMAL_ROOT_COLOR, SELECTED_BACKGROUND,
         SELECTED_ROOT_COLOR,
     },
@@ -29,7 +29,7 @@ use std::cmp::Ordering;
 
 mod context;
 
-pub struct Document {
+pub struct StateGraphViewer {
     pub window: Handle<UiNode>,
     pub canvas: Handle<UiNode>,
     canvas_context_menu: CanvasContextMenu,
@@ -47,7 +47,7 @@ fn fetch_state_node_model_handle(
         .model_handle
 }
 
-impl Document {
+impl StateGraphViewer {
     pub fn new(ctx: &mut BuildContext) -> Self {
         let mut node_context_menu = NodeContextMenu::new(ctx);
         let mut canvas_context_menu = CanvasContextMenu::new(ctx);
@@ -85,6 +85,31 @@ impl Document {
         }
     }
 
+    pub fn clear(&self, ui: &UserInterface) {
+        for &child in ui.node(self.canvas).children() {
+            ui.send_message(WidgetMessage::remove(child, MessageDirection::ToWidget));
+        }
+    }
+
+    pub fn activate_transition(
+        &self,
+        ui: &UserInterface,
+        transition: Handle<TransitionDefinition>,
+    ) {
+        if let Some(view_handle) = ui.node(self.canvas).children().iter().cloned().find(|c| {
+            ui.node(*c)
+                .query_component::<Transition>()
+                .map_or(false, |transition_view_ref| {
+                    transition_view_ref.model_handle == transition
+                })
+        }) {
+            ui.send_message(TransitionMessage::activate(
+                view_handle,
+                MessageDirection::ToWidget,
+            ));
+        }
+    }
+
     pub fn handle_ui_message(
         &mut self,
         message: &UiMessage,
@@ -109,6 +134,7 @@ impl Document {
                                 source,
                                 dest,
                                 rule: "".to_string(),
+                                invert_rule: false,
                             }));
                         }
                     }
@@ -146,9 +172,9 @@ impl Document {
                                         })
                                     }
                                 })
-                                .collect();
+                                .collect::<Vec<_>>();
 
-                            if selection != data_model.selection {
+                            if !selection.is_empty() && selection != data_model.selection {
                                 sender.do_command(ChangeSelectionCommand { selection });
                             }
                         }
@@ -167,7 +193,7 @@ impl Document {
     }
 
     pub fn sync_to_model(&mut self, data_model: &AbsmDataModel, ui: &mut UserInterface) {
-        let definition = &data_model.absm_definition;
+        let definition = &data_model.resource.data_ref().absm_definition;
 
         let canvas = ui
             .node(self.canvas)
@@ -276,7 +302,7 @@ impl Document {
             let state_model_handle = state_node.model_handle;
             let state_model_ref = &definition.states[state_node.model_handle];
 
-            if &state_model_ref.name != &state_node.name_value {
+            if state_model_ref.name != state_node.name_value {
                 send_sync_message(
                     ui,
                     AbsmNodeMessage::name(

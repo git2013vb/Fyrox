@@ -1,3 +1,4 @@
+use crate::absm::command::blend::SetBlendAnimationsPoseSourceCommand;
 use crate::{
     absm::{
         canvas::{AbsmCanvasBuilder, AbsmCanvasMessage},
@@ -16,7 +17,7 @@ use crate::{
     send_sync_message,
 };
 use fyrox::{
-    animation::machine::{node::PoseNodeDefinition, state::StateDefinition, MachineDefinition},
+    animation::machine::{node::PoseNodeDefinition, state::StateDefinition},
     core::pool::Handle,
     gui::{
         border::BorderBuilder,
@@ -127,9 +128,13 @@ impl StateViewer {
         data_model: &AbsmDataModel,
         ui: &UserInterface,
     ) {
+        assert!(state.is_some());
+
         self.state = state;
 
         let (state_name, exists) = data_model
+            .resource
+            .data_ref()
             .absm_definition
             .states
             .try_borrow(self.state)
@@ -157,13 +162,26 @@ impl StateViewer {
             MessageDirection::ToWidget,
             exists,
         ));
+    }
 
-        if state.is_none() {
-            // Clear canvas if state wasn't specified.
-            for &child in ui.node(self.canvas).children() {
-                ui.send_message(WidgetMessage::remove(child, MessageDirection::ToWidget));
-            }
+    pub fn clear(&mut self, ui: &UserInterface) {
+        self.state = Handle::NONE;
+
+        for &child in ui.node(self.canvas).children() {
+            ui.send_message(WidgetMessage::remove(child, MessageDirection::ToWidget));
         }
+
+        ui.send_message(WindowMessage::title(
+            self.window,
+            MessageDirection::ToWidget,
+            WindowTitle::text("State Viewer - No State"),
+        ));
+
+        ui.send_message(WidgetMessage::enabled(
+            self.canvas_context_menu.menu,
+            MessageDirection::ToWidget,
+            false,
+        ));
     }
 
     pub fn handle_ui_message(
@@ -173,6 +191,8 @@ impl StateViewer {
         sender: &MessageSender,
         data_model: &AbsmDataModel,
     ) {
+        let definition = &data_model.resource.data_ref().absm_definition;
+
         if message.destination() == self.canvas {
             if let Some(msg) = message.data::<AbsmCanvasMessage>() {
                 match msg {
@@ -206,9 +226,9 @@ impl StateViewer {
                                             SelectedEntity::PoseNode(state_node.model_handle)
                                         })
                                 })
-                                .collect();
+                                .collect::<Vec<_>>();
 
-                            if selection != data_model.selection {
+                            if !selection.is_empty() && selection != data_model.selection {
                                 sender.do_command(ChangeSelectionCommand { selection });
                             }
                         }
@@ -223,10 +243,16 @@ impl StateViewer {
                             ui.node(*dest_socket).query_component::<Socket>().unwrap();
                         let dest_node = fetch_socket_pose_node_model_handle(*dest_socket, ui);
 
-                        let dest_node_ref = &data_model.absm_definition.nodes[dest_node];
+                        let dest_node_ref = &definition.nodes[dest_node];
                         match dest_node_ref {
                             PoseNodeDefinition::PlayAnimation(_) => {}
-                            PoseNodeDefinition::BlendAnimations(_) => {}
+                            PoseNodeDefinition::BlendAnimations(_) => {
+                                sender.do_command(SetBlendAnimationsPoseSourceCommand {
+                                    handle: dest_node,
+                                    index: dest_socket_ref.index,
+                                    value: source_node,
+                                });
+                            }
                             PoseNodeDefinition::BlendAnimationsByIndex(_) => {
                                 sender.do_command(SetBlendAnimationByIndexInputPoseSourceCommand {
                                     handle: dest_node,
@@ -241,25 +267,27 @@ impl StateViewer {
             }
         }
 
-        self.node_context_menu
-            .handle_ui_message(message, data_model, sender, ui);
+        self.node_context_menu.handle_ui_message(
+            message,
+            &data_model.selection,
+            definition,
+            sender,
+            ui,
+        );
         self.canvas_context_menu
             .handle_ui_message(sender, message, self.state, ui);
         self.connection_context_menu
-            .handle_ui_message(message, ui, sender, data_model);
+            .handle_ui_message(message, ui, sender, definition);
     }
 
-    pub fn sync_to_model(
-        &mut self,
-        definition: &MachineDefinition,
-        ui: &mut UserInterface,
-        data_model: &AbsmDataModel,
-    ) {
+    pub fn sync_to_model(&mut self, ui: &mut UserInterface, data_model: &AbsmDataModel) {
         if self.state.is_none() {
             return;
         }
 
-        let parent_state_ref = &data_model.absm_definition.states[self.state];
+        let definition = &data_model.resource.data_ref().absm_definition;
+
+        let parent_state_ref = &definition.states[self.state];
 
         let mut views = ui
             .node(self.canvas)
@@ -408,7 +436,7 @@ impl StateViewer {
                 .query_component::<AbsmNode<PoseNodeDefinition>>()
                 .unwrap();
             let model_handle = view_ref.model_handle;
-            let model_ref = &data_model.absm_definition.nodes[model_handle];
+            let model_ref = &definition.nodes[model_handle];
             let children = model_ref.children();
             let position = view_ref.actual_local_position();
 
@@ -489,12 +517,12 @@ impl StateViewer {
             let dest_handle = dest_ref.handle();
             let input_sockets = dest_ref.base.input_sockets.clone();
 
-            let model_ref = &data_model.absm_definition.nodes[model];
+            let model_ref = &definition.nodes[model];
             for (i, child) in model_ref.children().into_iter().enumerate() {
                 // Sanity check.
                 assert_ne!(child, model);
 
-                if data_model.absm_definition.nodes.is_valid_handle(child) {
+                if definition.nodes.is_valid_handle(child) {
                     let source = views
                         .iter()
                         .filter_map(|v| {
