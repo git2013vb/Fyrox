@@ -65,10 +65,6 @@ fn inspect_attributes() {
         _skipped: u32,
         #[inspect(name = "the_x", display_name = "Super X")]
         x: f32,
-        // Expand properties are added to the end of the list.
-        // NOTE: Even though this field inspection is postponed, this field is given index `2`
-        #[inspect(expand)]
-        aar_gee: AarGee,
         #[inspect(
             read_only,
             min_value = 0.1,
@@ -106,21 +102,6 @@ fn inspect_attributes() {
     ];
 
     assert_eq!(data.properties()[0..2], expected);
-    assert_eq!(data.properties().len(), 2 + data.aar_gee.properties().len());
-
-    #[derive(Debug, Default, Inspect)]
-    pub struct X {
-        #[inspect(expand_subtree)]
-        y: Y,
-    }
-
-    #[derive(Debug, Default, Inspect)]
-    pub struct Y {
-        a: u32,
-    }
-
-    let x = X::default();
-    assert_eq!(x.properties().len(), 1 + x.y.properties().len());
 }
 
 #[test]
@@ -181,7 +162,7 @@ fn inspect_enum() {
         vec![
             PropertyInfo {
                 owner_type_id: TypeId::of::<Data>(),
-                name: "x",
+                name: "Named.x",
                 display_name: "X",
                 value: match data {
                     Data::Named { ref x, .. } => x,
@@ -191,7 +172,7 @@ fn inspect_enum() {
             },
             PropertyInfo {
                 owner_type_id: TypeId::of::<Data>(),
-                name: "y",
+                name: "Named.y",
                 display_name: "Y",
                 value: match data {
                     Data::Named { ref y, .. } => y,
@@ -201,7 +182,7 @@ fn inspect_enum() {
             },
             PropertyInfo {
                 owner_type_id: TypeId::of::<Data>(),
-                name: "z",
+                name: "Named.z",
                 display_name: "Z",
                 value: match data {
                     Data::Named { ref z, .. } => z,
@@ -219,7 +200,7 @@ fn inspect_enum() {
         vec![
             PropertyInfo {
                 owner_type_id: TypeId::of::<Data>(),
-                name: "0",
+                name: "Tuple.0",
                 display_name: "0",
                 value: match data {
                     Data::Tuple(ref f0, ref _f1) => f0,
@@ -229,7 +210,7 @@ fn inspect_enum() {
             },
             PropertyInfo {
                 owner_type_id: TypeId::of::<Data>(),
-                name: "1",
+                name: "Tuple.1",
                 display_name: "1",
                 value: match data {
                     Data::Tuple(ref _f0, ref f1) => f1,
@@ -247,27 +228,19 @@ fn inspect_enum() {
 
 #[test]
 fn inspect_prop_key_constants() {
-    #[derive(Debug, Inspect)]
-    pub struct X;
-
     #[allow(dead_code)]
     #[derive(Inspect)]
     pub struct SStruct {
         field: usize,
         #[inspect(skip)]
         hidden: usize,
-        #[inspect(expand)]
-        expand: X,
-        #[inspect(expand_subtree)]
-        expand_subtree: X,
     }
 
     // NOTE: property names are in snake_case (not Title Case)
     assert_eq!(SStruct::FIELD, "field");
-    // property keys for uninspectable fields are NOT emitted
+
+    // hidden properties
     // assert_eq!(SStruct::HIDDEN, "hidden");
-    // assert_eq!(SStruct::EXPAND, "expand");
-    assert_eq!(SStruct::EXPAND_SUBTREE, "expand_subtree");
 
     #[derive(Inspect)]
     pub struct STuple(usize);
@@ -281,11 +254,11 @@ fn inspect_prop_key_constants() {
         Unit,
     }
 
-    assert_eq!(E::TUPLE_F_0, "0");
-    assert_eq!(E::STRUCT_FIELD, "field");
+    assert_eq!(E::TUPLE_F_0, "Tuple.0");
+    assert_eq!(E::TUPLE_F_0, E::Tuple(0).properties()[0].name);
 
-    // variant itself it not a property
-    // assert_eq!(E::UNIT, "unit");
+    assert_eq!(E::STRUCT_FIELD, "Struct.field");
+    assert_eq!(E::STRUCT_FIELD, E::Struct { field: 0 }.properties()[0].name);
 }
 
 #[test]
