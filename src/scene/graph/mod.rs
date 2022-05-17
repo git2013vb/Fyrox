@@ -26,6 +26,7 @@ use crate::{
     asset::ResourceState,
     core::{
         algebra::{Matrix4, Rotation3, UnitQuaternion, Vector2, Vector3},
+        inspect::{Inspect, PropertyInfo},
         instant,
         math::Matrix4Ext,
         pool::{Handle, Pool, Ticket},
@@ -92,10 +93,15 @@ impl GraphPerformanceStatistics {
 pub type NodePool = Pool<Node, NodeContainer>;
 
 /// See module docs.
-#[derive(Debug)]
+#[derive(Debug, Inspect)]
 pub struct Graph {
+    #[inspect(skip)]
     root: Handle<Node>,
+
+    #[inspect(skip)]
     pool: NodePool,
+
+    #[inspect(skip)]
     stack: Vec<Handle<Node>>,
 
     /// Backing physics "world". It is responsible for the physics simulation.
@@ -108,6 +114,7 @@ pub struct Graph {
     pub sound_context: SoundContext,
 
     /// Performance statistics of a last [`Graph::update`] call.
+    #[inspect(skip)]
     pub performance_statistics: GraphPerformanceStatistics,
 }
 
@@ -633,8 +640,14 @@ impl Graph {
                     if node_resource == resource {
                         let previous_mapping =
                             old_new_mapping.insert(node.original_handle_in_resource, node_handle);
-                        // There must be no such node.
-                        assert!(previous_mapping.is_none());
+                        // There should be no such node.
+                        if previous_mapping.is_some() {
+                            Log::warn(format!(
+                                "There are multiple original nodes for {:?}! Previous was {:?}. \
+                                This can happen if a respective node was deleted.",
+                                node_handle, node.original_handle_in_resource
+                            ))
+                        }
                     }
                 }
 
@@ -1234,21 +1247,21 @@ impl<'a> Iterator for GraphHandleTraverseIterator<'a> {
 
 impl Visit for Graph {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        visitor.enter_region(name)?;
-
         // Pool must be empty, otherwise handles will be invalid and everything will blow up.
         if visitor.is_reading() && self.pool.get_capacity() != 0 {
             panic!("Graph pool must be empty on load!")
         }
 
-        self.root.visit("Root", visitor)?;
-        self.pool.visit("Pool", visitor)?;
-        // Backward compatibility
-        let _ = self.sound_context.visit("SoundContext", visitor);
-        let _ = self.physics.visit("PhysicsWorld", visitor);
-        let _ = self.physics2d.visit("PhysicsWorld2D", visitor);
+        let mut region = visitor.enter_region(name)?;
 
-        visitor.leave_region()
+        self.root.visit("Root", &mut region)?;
+        self.pool.visit("Pool", &mut region)?;
+        // Backward compatibility
+        let _ = self.sound_context.visit("SoundContext", &mut region);
+        let _ = self.physics.visit("PhysicsWorld", &mut region);
+        let _ = self.physics2d.visit("PhysicsWorld2D", &mut region);
+
+        Ok(())
     }
 }
 

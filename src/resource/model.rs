@@ -51,10 +51,12 @@ pub(in crate) enum NodeMapping {
 }
 
 /// See module docs.
-#[derive(Debug)]
+#[derive(Debug, Visit)]
 pub struct ModelData {
     pub(in crate) path: PathBuf,
+    #[visit(skip)]
     pub(in crate) mapping: NodeMapping,
+    #[visit(skip)]
     scene: Scene,
 }
 
@@ -226,16 +228,6 @@ impl Default for ModelData {
             mapping: NodeMapping::UseNames,
             scene: Scene::new(),
         }
-    }
-}
-
-impl Visit for ModelData {
-    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        visitor.enter_region(name)?;
-
-        self.path.visit("Path", visitor)?;
-
-        visitor.leave_region()
     }
 }
 
