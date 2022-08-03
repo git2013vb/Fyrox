@@ -9,8 +9,10 @@
 #![allow(clippy::from_over_into)]
 #![allow(clippy::new_without_default)]
 
+pub use copypasta;
 pub use fyrox_core as core;
 
+pub mod bit;
 pub mod border;
 pub mod brush;
 pub mod button;
@@ -59,7 +61,7 @@ use crate::{
     core::{
         algebra::Vector2,
         color::Color,
-        math::{clampf, Rect},
+        math::Rect,
         pool::{Handle, Pool},
         scope_profile,
     },
@@ -1100,8 +1102,8 @@ impl UserInterface {
 
             size = transform_size(size, &node.layout_transform);
 
-            size.x = clampf(size.x, node.min_size().x, node.max_size().x);
-            size.y = clampf(size.y, node.min_size().y, node.max_size().y);
+            size.x = size.x.clamp(node.min_size().x, node.max_size().x);
+            size.y = size.y.clamp(node.min_size().y, node.max_size().y);
 
             let mut desired_size = node.measure_override(self, size);
 
@@ -1116,8 +1118,8 @@ impl UserInterface {
                 desired_size.y = node.height();
             }
 
-            desired_size.x = clampf(desired_size.x, node.min_size().x, node.max_size().x);
-            desired_size.y = clampf(desired_size.y, node.min_size().y, node.max_size().y);
+            desired_size.x = desired_size.x.clamp(node.min_size().x, node.max_size().x);
+            desired_size.y = desired_size.y.clamp(node.min_size().y, node.max_size().y);
 
             desired_size += axes_margin;
 
@@ -1593,14 +1595,10 @@ impl UserInterface {
                         WidgetMessage::Center => {
                             if message.destination().is_some() {
                                 let node = self.node(message.destination());
-                                let size = node.actual_size();
+                                let size = node.actual_initial_size();
                                 let parent = node.parent();
                                 let parent_size = if parent.is_some() {
-                                    if parent == self.root_canvas {
-                                        self.screen_size
-                                    } else {
-                                        self.node(parent).actual_size()
-                                    }
+                                    self.node(parent).actual_initial_size()
                                 } else {
                                     self.screen_size
                                 };
@@ -1615,7 +1613,7 @@ impl UserInterface {
                         WidgetMessage::MouseDown { button, .. } => {
                             if *button == MouseButton::Right {
                                 if let Some(picked) = self.nodes.try_borrow(self.picked_node) {
-                                    // Get the context menu from the current node or aa parent node
+                                    // Get the context menu from the current node or a parent node
                                     let (context_menu, target) = if picked.context_menu().is_some()
                                     {
                                         (picked.context_menu(), self.picked_node)
@@ -1659,6 +1657,10 @@ impl UserInterface {
         }
     }
 
+    pub fn screen_to_root_canvas_space(&self, position: Vector2<f32>) -> Vector2<f32> {
+        self.node(self.root()).screen_to_local(position)
+    }
+
     fn show_tooltip(&self, tooltip: Handle<UiNode>) {
         self.send_message(WidgetMessage::visibility(
             tooltip,
@@ -1669,7 +1671,7 @@ impl UserInterface {
         self.send_message(WidgetMessage::desired_position(
             tooltip,
             MessageDirection::ToWidget,
-            self.cursor_position() + Vector2::new(0.0, 16.0),
+            self.screen_to_root_canvas_space(self.cursor_position() + Vector2::new(0.0, 16.0)),
         ));
     }
 

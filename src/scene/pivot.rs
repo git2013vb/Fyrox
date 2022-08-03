@@ -1,9 +1,12 @@
 //! A simplest possible node which represents point in space.
+use crate::scene::graph::map::NodeHandleMap;
 use crate::{
+    core::variable::InheritError,
     core::{
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
         visitor::prelude::*,
     },
@@ -12,14 +15,12 @@ use crate::{
         base::{Base, BaseBuilder},
         graph::Graph,
         node::{Node, NodeTrait, TypeUuidProvider},
-        variable::InheritError,
     },
 };
-use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
 
 /// A simplest possible node which represents point in space.
-#[derive(Clone, Inspect, Default, Debug)]
+#[derive(Clone, Inspect, Reflect, Default, Debug)]
 pub struct Pivot {
     base: Base,
 }
@@ -73,7 +74,7 @@ impl NodeTrait for Pivot {
         self.base.restore_resources(resource_manager)
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping)
     }
 

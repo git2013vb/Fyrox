@@ -3,12 +3,13 @@
 //! For more info see [`Base`]
 
 use crate::{
-    core::uuid::Uuid,
     core::{
         algebra::{Matrix4, Vector3},
         inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext},
         pool::{ErasedHandle, Handle},
+        reflect::Reflect,
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::{Visit, VisitError, VisitResult, Visitor},
         VecExtensions,
     },
@@ -16,23 +17,20 @@ use crate::{
     impl_directly_inheritable_entity_trait,
     resource::model::Model,
     scene::{
-        node::Node,
-        transform::Transform,
-        variable::{InheritError, TemplateVariable},
-        DirectlyInheritableEntity,
+        graph::map::NodeHandleMap, node::Node, transform::Transform, DirectlyInheritableEntity,
     },
     script::Script,
     utils::log::Log,
 };
-use fxhash::FxHashMap;
 use std::{
     cell::Cell,
     ops::{Deref, DerefMut},
+    sync::mpsc::Sender,
 };
 use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 
 /// A handle to scene node that will be controlled by LOD system.
-#[derive(Inspect, Default, Debug, Clone, Copy, PartialEq, Hash)]
+#[derive(Inspect, Reflect, Default, Debug, Clone, Copy, PartialEq, Hash)]
 pub struct LodControlledObject(pub Handle<Node>);
 
 impl Deref for LodControlledObject {
@@ -60,7 +58,7 @@ impl Visit for LodControlledObject {
 /// Normalized distance is a distance in (0; 1) range where 0 - closest to camera,
 /// 1 - farthest. Real distance can be obtained by multiplying normalized distance
 /// with z_far of current projection matrix.
-#[derive(Debug, Default, Clone, Visit, Inspect, PartialEq)]
+#[derive(Debug, Default, Clone, Visit, Inspect, Reflect, PartialEq)]
 pub struct LevelOfDetail {
     begin: f32,
     end: f32,
@@ -124,7 +122,7 @@ impl LevelOfDetail {
 /// Lod group must contain non-overlapping cascades, each cascade with its own set of objects
 /// that belongs to level of detail. Engine does not care if you create overlapping cascades,
 /// it is your responsibility to create non-overlapping cascades.
-#[derive(Debug, Default, Clone, Visit, Inspect, PartialEq)]
+#[derive(Debug, Default, Clone, Visit, Inspect, Reflect, PartialEq)]
 pub struct LodGroup {
     /// Set of cascades.
     pub levels: Vec<LevelOfDetail>,
@@ -141,6 +139,7 @@ pub struct LodGroup {
     Eq,
     Debug,
     Inspect,
+    Reflect,
     AsRefStr,
     EnumString,
     EnumVariantNames,
@@ -207,7 +206,9 @@ impl Visit for Mobility {
 }
 
 /// A property value.
-#[derive(Debug, Visit, Inspect, PartialEq, Clone, AsRefStr, EnumString, EnumVariantNames)]
+#[derive(
+    Debug, Visit, Inspect, Reflect, PartialEq, Clone, AsRefStr, EnumString, EnumVariantNames,
+)]
 pub enum PropertyValue {
     /// A node handle.
     ///
@@ -254,12 +255,29 @@ impl Default for PropertyValue {
 }
 
 /// A custom property.
-#[derive(Debug, Visit, Inspect, Default, Clone, PartialEq)]
+#[derive(Debug, Visit, Inspect, Reflect, Default, Clone, PartialEq)]
 pub struct Property {
     /// Name of the property.
     pub name: String,
     /// A value of the property.
     pub value: PropertyValue,
+}
+
+/// A script message from scene node. It is used for deferred initialization/deinitialization.
+pub enum ScriptMessage {
+    /// A script was set to a node and needs to be initialized.
+    InitializeScript {
+        /// Node handle.
+        handle: Handle<Node>,
+    },
+    /// A node script must be destroyed. It can happen if the script was replaced with some other
+    /// or a node was destroyed.
+    DestroyScript {
+        /// Script instance.
+        script: Script,
+        /// Node handle.
+        handle: Handle<Node>,
+    },
 }
 
 /// Base scene graph node is a simplest possible node, it is used to build more complex ones using composition.
@@ -282,81 +300,119 @@ pub struct Property {
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Inspect)]
+#[derive(Debug, Inspect, Reflect)]
 pub struct Base {
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(skip)]
+    #[reflect(hidden)]
+    pub(crate) self_handle: Handle<Node>,
+
+    #[inspect(skip)]
+    #[reflect(hidden)]
+    pub(crate) script_message_sender: Option<Sender<ScriptMessage>>,
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_name_internal")]
     pub(crate) name: TemplateVariable<String>,
 
     pub(crate) local_transform: Transform,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_visibility")]
     visibility: TemplateVariable<bool>,
 
     // Maximum amount of Some(time) that node will "live" or None
     // if node has undefined lifetime.
-    #[inspect(getter = "Deref::deref")]
-    pub(in crate) lifetime: TemplateVariable<Option<f32>>,
+    #[inspect(skip)] // TEMPORARILY HIDDEN. It causes crashes when set from the editor.
+    #[reflect(hidden)]
+    pub(crate) lifetime: TemplateVariable<Option<f32>>,
 
-    #[inspect(min_value = 0.0, max_value = 1.0, step = 0.1, getter = "Deref::deref")]
+    #[inspect(
+        min_value = 0.0,
+        max_value = 1.0,
+        step = 0.1,
+        deref,
+        is_modified = "is_modified()"
+    )]
+    #[reflect(deref, setter = "set_depth_offset_factor")]
     depth_offset: TemplateVariable<f32>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_lod_group")]
     lod_group: TemplateVariable<Option<LodGroup>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_mobility")]
     mobility: TemplateVariable<Mobility>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_tag")]
     tag: TemplateVariable<String>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_cast_shadows")]
     cast_shadows: TemplateVariable<bool>,
 
     /// A set of custom properties that can hold almost any data. It can be used to set additional
     /// properties to scene nodes.
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_properties")]
     pub properties: TemplateVariable<Vec<Property>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_frustum_culling")]
     frustum_culling: TemplateVariable<bool>,
 
     #[inspect(skip)]
-    pub(in crate) transform_modified: Cell<bool>,
+    #[reflect(hidden)]
+    pub(crate) transform_modified: Cell<bool>,
 
     // When `true` it means that this node is instance of `resource`.
     // More precisely - this node is root of whole descendant nodes
     // hierarchy which was instantiated from resource.
     #[inspect(read_only)]
-    pub(in crate) is_resource_instance_root: bool,
+    pub(crate) is_resource_instance_root: bool,
 
     #[inspect(skip)]
-    pub(in crate) global_visibility: Cell<bool>,
+    #[reflect(hidden)]
+    pub(crate) global_visibility: Cell<bool>,
 
     #[inspect(skip)]
-    pub(in crate) parent: Handle<Node>,
+    #[reflect(hidden)]
+    pub(crate) parent: Handle<Node>,
 
     #[inspect(skip)]
-    pub(in crate) children: Vec<Handle<Node>>,
+    #[reflect(hidden)]
+    pub(crate) children: Vec<Handle<Node>>,
 
     #[inspect(skip)]
-    pub(in crate) global_transform: Cell<Matrix4<f32>>,
+    #[reflect(hidden)]
+    pub(crate) global_transform: Cell<Matrix4<f32>>,
 
     // Bone-specific matrix. Non-serializable.
     #[inspect(skip)]
-    pub(in crate) inv_bind_pose_transform: Matrix4<f32>,
+    #[reflect(hidden)]
+    pub(crate) inv_bind_pose_transform: Matrix4<f32>,
 
     // A resource from which this node was instantiated from, can work in pair
     // with `original` handle to get corresponding node from resource.
     #[inspect(read_only)]
-    pub(in crate) resource: Option<Model>,
+    #[reflect(hidden)]
+    pub(crate) resource: Option<Model>,
 
     // Handle to node in scene of model resource from which this node
     // was instantiated from.
     #[inspect(read_only)]
-    pub(in crate) original_handle_in_resource: Handle<Node>,
+    #[reflect(hidden)]
+    pub(crate) original_handle_in_resource: Handle<Node>,
 
-    /// Current script of the scene node.
-    pub script: Option<Script>,
+    // Current script of the scene node.
+    pub(crate) script: Option<Script>,
+}
+
+impl Drop for Base {
+    fn drop(&mut self) {
+        self.remove_script();
+    }
 }
 
 impl_directly_inheritable_entity_trait!(Base;
@@ -374,6 +430,8 @@ impl_directly_inheritable_entity_trait!(Base;
 impl Clone for Base {
     fn clone(&self) -> Self {
         Self {
+            self_handle: Default::default(), // Intentionally not copied!
+            script_message_sender: None,     // Intentionally not copied!
             name: self.name.clone(),
             local_transform: self.local_transform.clone(),
             global_transform: self.global_transform.clone(),
@@ -403,9 +461,12 @@ impl Clone for Base {
 
 impl Base {
     /// Sets name of node. Can be useful to mark a node to be able to find it later on.
-    pub fn set_name<N: AsRef<str>>(&mut self, name: N) -> &mut Self {
-        self.name.set(name.as_ref().to_owned());
-        self
+    pub fn set_name<N: AsRef<str>>(&mut self, name: N) {
+        self.set_name_internal(name.as_ref().to_owned());
+    }
+
+    fn set_name_internal(&mut self, name: String) -> String {
+        self.name.set(name)
     }
 
     /// Returns name of node.
@@ -432,9 +493,8 @@ impl Base {
     }
 
     /// Sets new local transform of a node.
-    pub fn set_local_transform(&mut self, transform: Transform) -> &mut Self {
+    pub fn set_local_transform(&mut self, transform: Transform) {
         self.local_transform = transform;
-        self
     }
 
     /// Tries to find properties by the name. The method returns an iterator because it possible
@@ -446,6 +506,11 @@ impl Base {
     /// Tries to find a first property with the given name.
     pub fn find_first_property_ref(&self, name: &str) -> Option<&Property> {
         self.properties.iter().find(|p| p.name == name)
+    }
+
+    /// Sets a new set of properties of the node.
+    pub fn set_properties(&mut self, properties: Vec<Property>) -> Vec<Property> {
+        std::mem::replace(self.properties.get_mut(), properties)
     }
 
     /// Sets lifetime of node in seconds, lifetime is useful for temporary objects.
@@ -504,9 +569,8 @@ impl Base {
     }
 
     /// Sets local visibility of a node.
-    pub fn set_visibility(&mut self, visibility: bool) -> &mut Self {
-        self.visibility.set(visibility);
-        self
+    pub fn set_visibility(&mut self, visibility: bool) -> bool {
+        self.visibility.set(visibility)
     }
 
     /// Returns local visibility of a node.
@@ -531,9 +595,8 @@ impl Base {
     ///
     /// TODO. Mobility still has no effect, it was designed to be used in combined
     /// rendering (dynamic + static lights (lightmaps))
-    pub fn set_mobility(&mut self, mobility: Mobility) -> &mut Self {
-        self.mobility.set(mobility);
-        self
+    pub fn set_mobility(&mut self, mobility: Mobility) -> Mobility {
+        self.mobility.set(mobility)
     }
 
     /// Return current mobility of the node.
@@ -588,8 +651,8 @@ impl Base {
     /// This value is used to modify projection matrix before render node. Element m\[4\]\[3\] of projection
     /// matrix usually set to -1 to which makes w coordinate of in homogeneous space to be -z_fragment for
     /// further perspective divide. We can abuse this to shift z of fragment by some value.
-    pub fn set_depth_offset_factor(&mut self, factor: f32) {
-        self.depth_offset.set(factor.abs().min(1.0).max(0.0));
+    pub fn set_depth_offset_factor(&mut self, factor: f32) -> f32 {
+        self.depth_offset.set(factor.abs().min(1.0).max(0.0))
     }
 
     /// Returns depth offset factor.
@@ -628,8 +691,8 @@ impl Base {
     }
 
     /// Sets new tag.
-    pub fn set_tag(&mut self, tag: String) {
-        self.tag.set(tag);
+    pub fn set_tag(&mut self, tag: String) -> String {
+        self.tag.set(tag)
     }
 
     /// Return the frustum_culling flag
@@ -638,8 +701,8 @@ impl Base {
     }
 
     /// Sets whether to use frustum culling or not
-    pub fn set_frustum_culling(&mut self, frustum_culling: bool) {
-        self.frustum_culling.set(frustum_culling);
+    pub fn set_frustum_culling(&mut self, frustum_culling: bool) -> bool {
+        self.frustum_culling.set(frustum_culling)
     }
 
     /// Returns true if the node should cast shadows, false - otherwise.
@@ -650,18 +713,65 @@ impl Base {
 
     /// Sets whether the mesh should cast shadows or not.
     #[inline]
-    pub fn set_cast_shadows(&mut self, cast_shadows: bool) {
-        self.cast_shadows.set(cast_shadows);
+    pub fn set_cast_shadows(&mut self, cast_shadows: bool) -> bool {
+        self.cast_shadows.set(cast_shadows)
+    }
+
+    fn remove_script(&mut self) {
+        // Send script to the graph to destroy script instances correctly.
+        if let Some(script) = self.script.take() {
+            if let Some(sender) = self.script_message_sender.as_ref() {
+                Log::verify(sender.send(ScriptMessage::DestroyScript {
+                    script,
+                    handle: self.self_handle,
+                }));
+            } else {
+                Log::warn(format!(
+                    "There is a script instance on a node {}, but no message sender. \
+                    The script won't be correctly destroyed!",
+                    self.name(),
+                ))
+            }
+        }
     }
 
     /// Sets new script for the scene node.
     pub fn set_script(&mut self, script: Option<Script>) {
+        self.remove_script();
         self.script = script;
+        if let Some(sender) = self.script_message_sender.as_ref() {
+            if self.script.is_some() {
+                Log::verify(sender.send(ScriptMessage::InitializeScript {
+                    handle: self.self_handle,
+                }));
+            }
+        }
+    }
+
+    /// Returns shared reference to current script instance.
+    pub fn script(&self) -> Option<&Script> {
+        self.script.as_ref()
+    }
+
+    /// Returns mutable reference to current script instance.
+    ///
+    /// # Important notes
+    ///
+    /// Do **not** replace script instance using mutable reference given to you by this method.
+    /// This will prevent correct script de-initialization! Use `Self::set_script` if you need
+    /// to replace the script.
+    pub fn script_mut(&mut self) -> Option<&mut Script> {
+        self.script.as_mut()
     }
 
     /// Returns a copy of the current script.
     pub fn script_cloned(&self) -> Option<Script> {
         self.script.clone()
+    }
+
+    /// Internal. Do not use.
+    pub fn script_inner(&mut self) -> &mut Option<Script> {
+        &mut self.script
     }
 
     /// Updates node lifetime and returns true if the node is still alive, false - otherwise.
@@ -674,7 +784,11 @@ impl Base {
         }
     }
 
-    pub(crate) fn restore_resources(&mut self, _resource_manager: ResourceManager) {}
+    pub(crate) fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        if let Some(script) = self.script.as_mut() {
+            script.restore_resources(resource_manager);
+        }
+    }
 
     // Prefab inheritance resolving.
     pub(crate) fn inherit_properties(&mut self, parent: &Base) -> Result<(), InheritError> {
@@ -688,15 +802,10 @@ impl Base {
         self.local_transform.reset_inheritable_properties();
     }
 
-    pub(crate) fn remap_handles(
-        &mut self,
-        old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>,
-    ) {
+    pub(crate) fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         for property in self.properties.get_mut_silent().iter_mut() {
             if let PropertyValue::NodeHandle(ref mut handle) = property.value {
-                if let Some(new_handle) = old_new_mapping.get(handle) {
-                    *handle = *new_handle;
-                } else {
+                if !old_new_mapping.try_map(handle) {
                     Log::warn(format!(
                         "Unable to remap node handle property {} of a node {}. Handle is {}!",
                         property.name, *self.name, handle
@@ -709,9 +818,7 @@ impl Base {
         if let Some(lod_group) = self.lod_group.get_mut_silent() {
             for level in lod_group.levels.iter_mut() {
                 level.objects.retain_mut_ext(|object| {
-                    if let Some(entry) = old_new_mapping.get(object) {
-                        // Replace to mapped.
-                        object.0 = *entry;
+                    if old_new_mapping.try_map(object) {
                         true
                     } else {
                         Log::warn(format!(
@@ -734,59 +841,8 @@ impl Default for Base {
     }
 }
 
-/// Serializes script in a data blob.
-#[allow(clippy::cast_ref_to_mut)] // See SAFETY block below
-pub fn serialize_script(script: &Script) -> Result<Vec<u8>, VisitError> {
-    let mut visitor = Visitor::new();
-
-    let mut script_type_uuid = script.id();
-    script_type_uuid.visit("TypeUuid", &mut visitor)?;
-
-    // SAFETY: It is guaranteed that visitor will **not** modify internal state of the object
-    // if it is in "write" mode (serialization mode).
-    let script = unsafe { &mut *(script as *const _ as *mut Script) };
-    script.visit("ScriptData", &mut visitor)?;
-
-    visitor.save_binary_to_vec()
-}
-
-/// Deserializes script from the data blob.
-pub fn deserialize_script(
-    data: Vec<u8>,
-    serialization_context: &SerializationContext,
-) -> Result<Script, VisitError> {
-    let mut visitor = Visitor::load_from_memory(data)?;
-
-    let mut script_type_uuid = Uuid::default();
-    script_type_uuid.visit("TypeUuid", &mut visitor)?;
-
-    if script_type_uuid.is_nil() {
-        Err(VisitError::User(
-            "Unable to deserialize script with zero UUID!".to_string(),
-        ))
-    } else {
-        let mut script = serialization_context
-            .script_constructors
-            .try_create(&script_type_uuid)
-            .ok_or_else(|| {
-                VisitError::User(format!(
-                    "There is no corresponding script constructor for {} type!",
-                    script_type_uuid
-                ))
-            })?;
-
-        script.visit("ScriptData", &mut visitor)?;
-
-        Ok(script)
-    }
-}
-
-/// Serializes Option<Script> using given serializer.
-pub fn visit_opt_script(
-    name: &str,
-    script: &mut Option<Script>,
-    visitor: &mut Visitor,
-) -> VisitResult {
+// Serializes Option<Script> using given serializer.
+fn visit_opt_script(name: &str, script: &mut Option<Script>, visitor: &mut Visitor) -> VisitResult {
     let mut region = visitor.enter_region(name)?;
 
     let mut script_type_uuid = script.as_ref().map(|s| s.id()).unwrap_or_default();
@@ -997,6 +1053,8 @@ impl BaseBuilder {
     /// Creates an instance of [`Base`].
     pub fn build_base(self) -> Base {
         Base {
+            self_handle: Default::default(),
+            script_message_sender: None,
             name: self.name.into(),
             children: self.children,
             local_transform: self.local_transform,

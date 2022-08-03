@@ -1,19 +1,20 @@
 pub mod machine;
 
-use crate::engine::resource_manager::ResourceManager;
 use crate::{
     asset::ResourceState,
     core::{
         algebra::{UnitQuaternion, Vector3},
-        math::{clampf, wrapf},
+        math::wrapf,
         pool::{Handle, Pool, Ticket},
         visitor::{Visit, VisitResult, Visitor},
     },
+    engine::resource_manager::ResourceManager,
     resource::model::Model,
     scene::{graph::Graph, node::Node},
     utils::log::{Log, MessageKind},
 };
 use fxhash::FxHashMap;
+use std::ops::Range;
 use std::{
     collections::VecDeque,
     ops::{Index, IndexMut},
@@ -166,7 +167,7 @@ impl Track {
             });
         }
 
-        time = clampf(time, 0.0, self.max_time);
+        time = time.clamp(0.0, self.max_time);
 
         let mut right_index = 0;
         for (i, keyframe) in self.frames.iter().enumerate() {
@@ -272,6 +273,8 @@ pub struct Animation {
     tracks: Vec<Track>,
     length: f32,
     time_position: f32,
+    #[visit(optional)] // Backward compatibility
+    time_slice: Option<Range<f32>>,
     ///////////////////////////////////////////////////////
     speed: f32,
     looped: bool,
@@ -369,7 +372,7 @@ impl AnimationPose {
     pub fn apply(&self, graph: &mut Graph) {
         for (node, local_pose) in self.local_poses.iter() {
             if node.is_none() {
-                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!".to_owned());
+                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
             } else {
                 graph[*node]
                     .local_transform_mut()
@@ -388,7 +391,7 @@ impl AnimationPose {
     {
         for (node, local_pose) in self.local_poses.iter() {
             if node.is_none() {
-                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!".to_owned());
+                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
             } else {
                 callback(&mut graph[*node], *node, local_pose);
             }
@@ -409,6 +412,7 @@ impl Clone for Animation {
             pose: Default::default(),
             signals: self.signals.clone(),
             events: Default::default(),
+            time_slice: self.time_slice.clone(),
         }
     }
 }
@@ -429,12 +433,29 @@ impl Animation {
     }
 
     pub fn set_time_position(&mut self, time: f32) -> &mut Self {
+        let time_slice = self.time_slice.clone().unwrap_or(Range {
+            start: 0.0,
+            end: self.length,
+        });
+
         if self.looped {
-            self.time_position = wrapf(time, 0.0, self.length);
+            self.time_position = wrapf(time, time_slice.start, time_slice.end);
         } else {
-            self.time_position = clampf(time, 0.0, self.length);
+            self.time_position = time.clamp(time_slice.start, time_slice.end);
         }
+
         self
+    }
+
+    pub fn set_time_slice(&mut self, time_slice: Option<Range<f32>>) {
+        if let Some(time_slice) = time_slice.clone() {
+            assert!(time_slice.start <= time_slice.end);
+        }
+
+        self.time_slice = time_slice;
+
+        // Ensure time position is in given time slice.
+        self.set_time_position(self.time_position);
     }
 
     pub fn rewind(&mut self) -> &mut Self {
@@ -693,6 +714,7 @@ impl Default for Animation {
             pose: Default::default(),
             signals: Default::default(),
             events: Default::default(),
+            time_slice: Default::default(),
         }
     }
 }
@@ -711,6 +733,11 @@ impl Default for AnimationContainer {
 impl AnimationContainer {
     pub(in crate) fn new() -> Self {
         Self { pool: Pool::new() }
+    }
+
+    #[inline]
+    pub fn alive_count(&self) -> u32 {
+        self.pool.alive_count()
     }
 
     #[inline]
@@ -797,16 +824,13 @@ impl AnimationContainer {
     }
 
     pub fn resolve(&mut self, graph: &Graph) {
-        Log::writeln(
-            MessageKind::Information,
-            "Resolving animations...".to_owned(),
-        );
+        Log::writeln(MessageKind::Information, "Resolving animations...");
         for animation in self.pool.iter_mut() {
             animation.resolve(graph)
         }
         Log::writeln(
             MessageKind::Information,
-            "Animations resolved successfully!".to_owned(),
+            "Animations resolved successfully!",
         );
     }
 

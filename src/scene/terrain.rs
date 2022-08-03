@@ -10,7 +10,9 @@ use crate::{
         },
         parking_lot::Mutex,
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::{prelude::*, PodVecView},
     },
     engine::resource_manager::ResourceManager,
@@ -19,18 +21,16 @@ use crate::{
     resource::texture::{Texture, TextureKind, TexturePixelKind, TextureWrapMode},
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         mesh::{
             buffer::{TriangleBuffer, VertexBuffer},
             surface::SurfaceData,
             vertex::StaticVertex,
         },
         node::{Node, NodeTrait, TypeUuidProvider, UpdateContext},
-        variable::{InheritError, TemplateVariable},
         DirectlyInheritableEntity,
     },
 };
-use fxhash::FxHashMap;
 use std::{
     cell::Cell,
     cmp::Ordering,
@@ -42,9 +42,10 @@ use std::{
 /// rendering. Terrain can have as many layers as you want, but each layer slightly decreases
 /// performance, so keep amount of layers on reasonable level (1 - 5 should be enough for most
 /// cases).
-#[derive(Default, Debug, Clone, Visit, Inspect)]
+#[derive(Default, Debug, Clone, Visit, Inspect, Reflect)]
 pub struct Layer {
     /// Material of the layer.
+    #[reflect(hidden)]
     pub material: Arc<Mutex<Material>>,
 
     /// Name of the mask sampler in the material.
@@ -55,7 +56,8 @@ pub struct Layer {
     pub mask_property_name: String,
 
     #[inspect(skip)]
-    pub(in crate) chunk_masks: Vec<Texture>,
+    #[reflect(hidden)]
+    pub(crate) chunk_masks: Vec<Texture>,
 }
 
 impl PartialEq for Layer {
@@ -252,34 +254,52 @@ pub struct TerrainRayCastResult {
 /// are inheritable. You cannot inherit width, height, chunks and other things because these cannot
 /// be modified at runtime because changing width (for example) will invalidate the entire height
 /// map which makes runtime modification useless.  
-#[derive(Visit, Debug, Default, Inspect, Clone)]
+#[derive(Visit, Debug, Default, Inspect, Reflect, Clone)]
 pub struct Terrain {
     base: Base,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_layers")]
     layers: TemplateVariable<Vec<Layer>>,
 
-    #[visit(optional)] // Backward compatibility
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_decal_layer_index")]
     decal_layer_index: TemplateVariable<u8>,
 
     #[inspect(read_only)]
+    #[reflect(hidden)]
     width: f32,
+
     #[inspect(read_only)]
+    #[reflect(hidden)]
     length: f32,
+
     #[inspect(read_only)]
+    #[reflect(hidden)]
     mask_resolution: f32,
+
     #[inspect(read_only)]
+    #[reflect(hidden)]
     height_map_resolution: f32,
+
     #[inspect(skip)]
+    #[reflect(hidden)]
     chunks: Vec<Chunk>,
+
     #[inspect(read_only)]
+    #[reflect(hidden)]
     width_chunks: u32,
+
     #[inspect(read_only)]
+    #[reflect(hidden)]
     length_chunks: u32,
+
     #[inspect(skip)]
+    #[reflect(hidden)]
     bounding_box_dirty: Cell<bool>,
+
     #[inspect(skip)]
+    #[reflect(hidden)]
     bounding_box: Cell<AxisAlignedBoundingBox>,
 }
 
@@ -354,8 +374,8 @@ impl Terrain {
     /// Sets new decal layer index. It defines which decals will be applies to the mesh,
     /// for example iff a decal has index == 0 and a mesh has index == 0, then decals will
     /// be applied. This allows you to apply decals only on needed surfaces.
-    pub fn set_decal_layer_index(&mut self, index: u8) {
-        self.decal_layer_index.set(index);
+    pub fn set_decal_layer_index(&mut self, index: u8) -> u8 {
+        self.decal_layer_index.set(index)
     }
 
     /// Returns current decal index.
@@ -551,6 +571,11 @@ impl Terrain {
         !results.is_empty()
     }
 
+    /// Sets new terrain layers.
+    pub fn set_layers(&mut self, layers: Vec<Layer>) -> Vec<Layer> {
+        self.layers.set(layers)
+    }
+
     /// Returns a reference to a slice with layers of the terrain.
     pub fn layers(&self) -> &[Layer] {
         &self.layers
@@ -658,12 +683,14 @@ impl NodeTrait for Terrain {
     }
 
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager.clone());
+
         for layer in self.layers() {
             layer.material.lock().resolve(resource_manager.clone());
         }
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
     }
 
@@ -681,7 +708,7 @@ impl NodeTrait for Terrain {
 }
 
 /// Shape of a brush.
-#[derive(Copy, Clone, Inspect, Debug)]
+#[derive(Copy, Clone, Inspect, Reflect, Debug)]
 pub enum BrushShape {
     /// Circle with given radius.
     Circle {
@@ -713,7 +740,7 @@ impl BrushShape {
 }
 
 /// Paint mode of a brush. It defines operation that will be performed on the terrain.
-#[derive(Clone, PartialEq, PartialOrd, Inspect, Debug)]
+#[derive(Clone, PartialEq, PartialOrd, Inspect, Reflect, Debug)]
 pub enum BrushMode {
     /// Modifies height map.
     ModifyHeightMap {
@@ -731,7 +758,7 @@ pub enum BrushMode {
 }
 
 /// Brush is used to modify terrain. It supports multiple shapes and modes.
-#[derive(Clone, Inspect, Debug)]
+#[derive(Clone, Inspect, Reflect, Debug)]
 pub struct Brush {
     /// Center of the brush.
     #[inspect(skip)]

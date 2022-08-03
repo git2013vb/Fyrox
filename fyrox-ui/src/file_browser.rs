@@ -1212,12 +1212,13 @@ impl FileSelectorBuilder {
 #[cfg(test)]
 mod test {
     use crate::{
-        core::{algebra::Vector2, pool::Handle},
+        core::pool::Handle,
         file_browser::{build_tree, find_tree},
         tree::TreeRootBuilder,
         widget::WidgetBuilder,
         UserInterface,
     };
+    use fyrox_core::algebra::Vector2;
     use std::{path::PathBuf, rc::Rc};
 
     #[test]

@@ -4,10 +4,16 @@
 
 #![warn(missing_docs)]
 
+use fyrox_core_derive::impl_inspect;
 use std::{
     any::{Any, TypeId},
     fmt::{self, Debug},
 };
+
+pub mod prelude {
+    //! Standard import for `Inspect` proc macro.
+    pub use super::{Inspect, PropertyInfo};
+}
 
 /// A value of a property.
 pub trait PropertyValue: Any + Debug {
@@ -125,8 +131,8 @@ impl<'a> PropertyInfo<'a> {
 /// A trait that allows you to "look inside" an object that implements it. It is used for lightweight
 /// runtime read-only reflection. The most common use case for it is various editors.
 ///
-/// It is not advised to manually implement this trait. You should use `#[derive(Inspect)]` whenever
-/// possible.
+/// It is not advised to manually implement this trait. You should use `#[derive(Inspect, Reflect)]`
+/// whenever possible.
 ///
 /// ## `#[derive(Inspect)]`
 ///
@@ -135,7 +141,6 @@ impl<'a> PropertyInfo<'a> {
 ///
 /// ### Supported attributes
 ///
-/// - `#[inspect(name = "new_field_name")]` - override field name.
 /// - `#[inspect(display_name = "Human-readable Name")]` - override display name.
 /// - `#[inspect(group = "Group Name")]` - override group name.
 /// - `#[inspect(expand)]` - extends the list of properties in case of composition, in other words it
@@ -146,19 +151,15 @@ pub trait Inspect {
     fn properties(&self) -> Vec<PropertyInfo<'_>>;
 }
 
-impl<T: Inspect> Inspect for Option<T> {
-    fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        match self {
-            Some(v) => v.properties(),
-            None => vec![],
-        }
+impl_inspect! {
+    pub enum Option<T: Inspect + Debug + 'static> {
+        Some(T),
+        None
     }
 }
 
-impl<T: Inspect> Inspect for Box<T> {
-    fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        (**self).properties()
-    }
+impl_inspect! {
+    pub struct Box<T: Inspect + Debug + 'static>;
 }
 
 macro_rules! impl_self_inspect {
@@ -167,8 +168,8 @@ macro_rules! impl_self_inspect {
             fn properties(&self) -> Vec<PropertyInfo<'_>> {
                 vec![PropertyInfo {
                     owner_type_id: TypeId::of::<Self>(),
-                    name: "Value",
-                    display_name: "Value",
+                    name: "self",
+                    display_name: "self",
                     value: self,
                     read_only: false,
                     min_value: Some($min),

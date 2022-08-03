@@ -20,9 +20,15 @@ use crate::{
     BuildContext, UiNode, UserInterface,
 };
 use fxhash::FxHashMap;
-use std::{any::TypeId, fmt::Debug, rc::Rc};
+use std::{
+    any::TypeId,
+    cell::{Ref, RefCell},
+    fmt::Debug,
+    rc::Rc,
+};
 
 pub mod array;
+pub mod bit;
 pub mod bool;
 pub mod collection;
 pub mod color;
@@ -51,6 +57,7 @@ pub struct PropertyEditorMessageContext<'a, 'b> {
     pub property_info: &'a PropertyInfo<'a>,
     pub definition_container: Rc<PropertyEditorDefinitionContainer>,
     pub layer_index: usize,
+    pub environment: Option<Rc<dyn InspectorEnvironment>>,
 }
 
 pub struct PropertyEditorTranslationContext<'b, 'c> {
@@ -93,12 +100,12 @@ pub trait PropertyEditorDefinition: Debug {
 
 #[derive(Clone, Default)]
 pub struct PropertyEditorDefinitionContainer {
-    definitions: FxHashMap<TypeId, Rc<dyn PropertyEditorDefinition>>,
+    definitions: RefCell<FxHashMap<TypeId, Rc<dyn PropertyEditorDefinition>>>,
 }
 
 impl PropertyEditorDefinitionContainer {
     pub fn new() -> Self {
-        let mut container = Self::default();
+        let container = Self::default();
 
         container.insert(BoolPropertyEditorDefinition);
 
@@ -189,14 +196,15 @@ impl PropertyEditorDefinitionContainer {
     }
 
     pub fn insert<T: PropertyEditorDefinition + 'static>(
-        &mut self,
+        &self,
         definition: T,
     ) -> Option<Rc<dyn PropertyEditorDefinition>> {
         self.definitions
+            .borrow_mut()
             .insert(definition.value_type_id(), Rc::new(definition))
     }
 
-    pub fn definitions(&self) -> &FxHashMap<TypeId, Rc<dyn PropertyEditorDefinition>> {
-        &self.definitions
+    pub fn definitions(&self) -> Ref<FxHashMap<TypeId, Rc<dyn PropertyEditorDefinition>>> {
+        self.definitions.borrow()
     }
 }

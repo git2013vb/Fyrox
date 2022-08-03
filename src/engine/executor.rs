@@ -1,24 +1,30 @@
 #![allow(missing_docs)]
 
-use crate::core::pool::Handle;
-use crate::scene::Scene;
 use crate::{
-    core::instant::Instant,
+    core::{futures::executor::block_on, instant::Instant, pool::Handle},
     engine::{resource_manager::ResourceManager, Engine, EngineInitParams, SerializationContext},
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    plugin::Plugin,
+    plugin::PluginConstructor,
+    scene::{node::TypeUuidProvider, SceneLoader},
     utils::{
         log::{Log, MessageKind},
         translate_event,
     },
     window::WindowBuilder,
 };
-use std::collections::HashSet;
+use clap::Parser;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
+
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    #[clap(short, long, default_value = "")]
+    override_scene: String,
+}
 
 pub struct Executor {
     event_loop: EventLoop<()>,
@@ -66,11 +72,11 @@ impl Executor {
         Self { event_loop, engine }
     }
 
-    pub fn add_plugin<P>(&mut self, plugin: P)
+    pub fn add_plugin_constructor<P>(&mut self, plugin: P)
     where
-        P: Plugin,
+        P: PluginConstructor + TypeUuidProvider + 'static,
     {
-        self.engine.add_plugin(plugin, false, true);
+        self.engine.add_plugin_constructor(plugin)
     }
 
     pub fn run(self) -> ! {
@@ -80,10 +86,31 @@ impl Executor {
         let clock = Instant::now();
         let fixed_timestep = 1.0 / 60.0;
         let mut elapsed_time = 0.0;
-        let mut initialized_scenes = HashSet::<Handle<Scene>>::default();
+
+        let args = Args::parse();
+
+        let mut override_scene = Handle::NONE;
+        if !args.override_scene.is_empty() {
+            match block_on(SceneLoader::from_file(
+                &args.override_scene,
+                engine.serialization_context.clone(),
+            )) {
+                Ok(loader) => {
+                    override_scene = engine
+                        .scenes
+                        .add(block_on(loader.finish(engine.resource_manager.clone())));
+                }
+                Err(e) => Log::warn(format!(
+                    "Unable to load {} override scene! Reason: {:?}",
+                    args.override_scene, e
+                )),
+            }
+        }
+
+        engine.enable_plugins(override_scene, true);
 
         event_loop.run(move |event, _, control_flow| {
-            engine.handle_os_event_by_plugins(&event, fixed_timestep, true);
+            engine.handle_os_event_by_plugins(&event, fixed_timestep, control_flow);
 
             let scenes = engine
                 .scenes
@@ -92,10 +119,14 @@ impl Executor {
                 .collect::<Vec<_>>();
 
             for scene_handle in scenes.iter() {
-                if !initialized_scenes.contains(scene_handle) {
+                if !engine.scripted_scenes.contains(scene_handle) {
                     engine.initialize_scene_scripts(*scene_handle, fixed_timestep);
-                    initialized_scenes.insert(*scene_handle);
+                    engine.scripted_scenes.insert(*scene_handle);
                 }
+
+                engine
+                    .scripted_scenes
+                    .retain(|s| engine.scenes.is_valid_handle(*s));
 
                 engine.handle_os_event_by_scripts(&event, *scene_handle, fixed_timestep);
             }
@@ -107,13 +138,7 @@ impl Executor {
                         dt -= fixed_timestep;
                         elapsed_time += fixed_timestep;
 
-                        engine.update_plugins(fixed_timestep, false);
-
-                        for &scene_handle in scenes.iter() {
-                            engine.update_scene_scripts(scene_handle, fixed_timestep);
-                        }
-
-                        engine.update(fixed_timestep);
+                        engine.update(fixed_timestep, control_flow);
                     }
 
                     while let Some(_ui_event) = engine.user_interface.poll_message() {}

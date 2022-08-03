@@ -1,6 +1,5 @@
 //! See [`UiRenderer`] docs.
 
-use crate::core::sstorage::ImmutableString;
 use crate::{
     asset::Resource,
     core::{
@@ -9,6 +8,7 @@ use crate::{
         math::Rect,
         parking_lot::Mutex,
         scope_profile,
+        sstorage::ImmutableString,
     },
     gui::{
         brush::Brush,

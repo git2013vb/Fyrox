@@ -9,6 +9,7 @@ use crate::{
     },
     utils::log::Log,
 };
+use fxhash::FxHashMap;
 
 pub struct FbxTimeValuePair {
     pub time: f32,
@@ -52,7 +53,7 @@ impl FbxAnimationCurve {
         if self.keys.is_empty() {
             Log::writeln(
                 MessageKind::Warning,
-                "FBX: Trying to evaluate curve with no keys!".to_owned(),
+                "FBX: Trying to evaluate curve with no keys!",
             );
 
             return 0.0;
@@ -97,7 +98,9 @@ pub enum FbxAnimationCurveNodeType {
 
 pub struct FbxAnimationCurveNode {
     pub actual_type: FbxAnimationCurveNodeType,
-    pub curves: Vec<Handle<FbxComponent>>,
+
+    /// Parameter name to curve mapping, usually it has `d|X`, `d|Y`, `d|Z` as key.
+    pub curves: FxHashMap<String, Handle<FbxComponent>>,
 }
 
 impl FbxAnimationCurveNode {
@@ -110,37 +113,38 @@ impl FbxAnimationCurveNode {
                 "S" | "AnimCurveNode::S" => FbxAnimationCurveNodeType::Scale,
                 _ => FbxAnimationCurveNodeType::Unknown,
             },
-            curves: Vec::new(),
+            curves: Default::default(),
         })
     }
 
-    pub fn eval_vec3(&self, scene: &FbxScene, time: f32) -> Vector3<f32> {
+    pub fn eval_vec3(&self, scene: &FbxScene, default: Vector3<f32>, time: f32) -> Vector3<f32> {
         if self.curves.is_empty() {
-            Default::default()
+            default
         } else {
-            let x = if let FbxComponent::AnimationCurve(curve) = scene.get(self.curves[0]) {
-                curve.eval(time)
-            } else {
-                0.0
+            let fetch_curve = |name: &str, default: f32| {
+                if let Some(FbxComponent::AnimationCurve(curve)) =
+                    self.curves.get(name).map(|c| scene.get(*c))
+                {
+                    curve.eval(time)
+                } else {
+                    default
+                }
             };
 
-            let y = if let FbxComponent::AnimationCurve(curve) = scene.get(self.curves[1]) {
-                curve.eval(time)
-            } else {
-                0.0
-            };
-
-            let z = if let FbxComponent::AnimationCurve(curve) = scene.get(self.curves[2]) {
-                curve.eval(time)
-            } else {
-                0.0
-            };
-
-            Vector3::new(x, y, z)
+            Vector3::new(
+                fetch_curve("d|X", default[0]),
+                fetch_curve("d|Y", default[1]),
+                fetch_curve("d|Z", default[2]),
+            )
         }
     }
 
-    pub fn eval_quat(&self, scene: &FbxScene, time: f32) -> UnitQuaternion<f32> {
-        quat_from_euler(self.eval_vec3(scene, time))
+    pub fn eval_quat(
+        &self,
+        scene: &FbxScene,
+        default_euler: Vector3<f32>,
+        time: f32,
+    ) -> UnitQuaternion<f32> {
+        quat_from_euler(self.eval_vec3(scene, default_euler, time))
     }
 }

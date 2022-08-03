@@ -1,10 +1,10 @@
+use crate::scene::commands::effect::make_set_effect_property_command;
 use crate::utils::window_content;
 use crate::{
     inspector::{
         editors::make_property_editors_container,
         handlers::{
-            effect::handle_reverb_effect_property_changed,
-            node::{particle_system::ParticleSystemHandler, SceneNodePropertyChangedHandler},
+            node::SceneNodePropertyChangedHandler,
             sound_context::handle_sound_context_property_changed,
         },
     },
@@ -51,9 +51,10 @@ impl InspectorEnvironment for EditorEnvironment {
 }
 
 pub struct Inspector {
-    pub window: Handle<UiNode>,
+    /// Allows you to register your property editors for custom types.
+    pub property_editors: Rc<PropertyEditorDefinitionContainer>,
+    pub(crate) window: Handle<UiNode>,
     inspector: Handle<UiNode>,
-    property_editors: Rc<PropertyEditorDefinitionContainer>,
     // Hack. This flag tells whether the inspector should sync with model or not.
     // There is only one situation when it has to be `false` - when inspector has
     // got new context - in this case we don't need to sync with model, because
@@ -66,7 +67,7 @@ pub struct Inspector {
 #[macro_export]
 macro_rules! make_command {
     ($cmd:ty, $handle:expr, $value:expr) => {
-        Some(crate::scene::commands::SceneCommand::new(<$cmd>::new(
+        Some($crate::scene::commands::SceneCommand::new(<$cmd>::new(
             $handle,
             $value.cast_value().cloned()?,
         )))
@@ -78,7 +79,7 @@ macro_rules! handle_properties {
     ($name:expr, $handle:expr, $value:expr, $($prop:path => $cmd:ty),*) => {
         match $name {
             $($prop => {
-                crate::make_command!($cmd, $handle, $value)
+                $crate::make_command!($cmd, $handle, $value)
             })*
             _ => None,
         }
@@ -92,7 +93,7 @@ macro_rules! handle_property_changed {
             FieldKind::Object(ref value) => {
                 match $args.name.as_ref() {
                     $($prop => {
-                        crate::make_command!($cmd, $handle, value)
+                        $crate::make_command!($cmd, $handle, value)
                     })*
                     _ => None,
                 }
@@ -152,9 +153,7 @@ impl Inspector {
             inspector,
             property_editors,
             needs_sync: true,
-            node_property_changed_handler: SceneNodePropertyChangedHandler {
-                particle_system_handler: ParticleSystemHandler::new(ctx),
-            },
+            node_property_changed_handler: SceneNodePropertyChangedHandler::new(),
             warning_text,
         }
     }
@@ -306,19 +305,6 @@ impl Inspector {
     ) {
         let scene = &mut engine.scenes[editor_scene.scene];
 
-        // Special case for particle systems.
-        if let Selection::Graph(selection) = &editor_scene.selection {
-            if let Some(group) = self
-                .node_property_changed_handler
-                .particle_system_handler
-                .handle_ui_message(message, selection, &engine.user_interface)
-            {
-                sender
-                    .send(Message::do_scene_command(CommandGroup::from(group)))
-                    .unwrap();
-            }
-        }
-
         if message.destination() == self.inspector
             && message.direction() == MessageDirection::FromWidget
         {
@@ -335,7 +321,6 @@ impl Inspector {
                                     args,
                                     node_handle,
                                     &mut scene.graph[node_handle],
-                                    &engine.user_interface,
                                 )
                             } else {
                                 None
@@ -348,7 +333,7 @@ impl Inspector {
                     Selection::Effect(selection) => selection
                         .effects
                         .iter()
-                        .filter_map(|&handle| handle_reverb_effect_property_changed(args, handle))
+                        .map(|&handle| make_set_effect_property_command(handle, args))
                         .collect::<Vec<_>>(),
                     _ => vec![],
                 };

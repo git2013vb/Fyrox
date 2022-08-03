@@ -1,10 +1,10 @@
-use crate::inspector::editors::PropertyEditorTranslationContext;
 use crate::{
     border::BorderBuilder,
+    button::ButtonBuilder,
     check_box::CheckBoxBuilder,
     core::{
         algebra::Vector2,
-        inspect::{CastError, Inspect, PropertyValue},
+        inspect::{CastError, Inspect},
         pool::Handle,
     },
     define_constructor,
@@ -13,7 +13,7 @@ use crate::{
     grid::{Column, GridBuilder, Row},
     inspector::editors::{
         PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorDefinitionContainer,
-        PropertyEditorInstance, PropertyEditorMessageContext,
+        PropertyEditorInstance, PropertyEditorMessageContext, PropertyEditorTranslationContext,
     },
     message::{MessageDirection, UiMessage},
     stack_panel::StackPanelBuilder,
@@ -22,6 +22,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
+use fyrox_core::reflect::{Reflect, ResolvePath};
 use std::{
     any::{Any, TypeId},
     fmt::{Debug, Formatter},
@@ -34,7 +35,7 @@ pub mod editors;
 #[derive(Debug, Clone, PartialEq)]
 pub enum CollectionChanged {
     /// An item should be added in the collection.
-    Add,
+    Add(ObjectValue),
     /// An item in the collection should be removed.
     Remove(usize),
     /// An item in the collection has changed one of its properties.
@@ -46,7 +47,7 @@ pub enum CollectionChanged {
 }
 
 impl CollectionChanged {
-    define_constructor!(CollectionChanged:Add => fn add(), layout: false);
+    define_constructor!(CollectionChanged:Add => fn add(ObjectValue), layout: false);
     define_constructor!(CollectionChanged:Remove => fn remove(usize), layout: false);
     define_constructor!(CollectionChanged:ItemChanged => fn item_changed(index: usize, property: PropertyChanged), layout: false);
 }
@@ -58,9 +59,121 @@ pub enum FieldKind {
     Object(ObjectValue),
 }
 
-#[derive(Debug, Clone)]
+/// An action for some property.
+#[derive(Debug)]
+pub enum PropertyAction {
+    /// A property needs to be modified with given value.
+    Modify {
+        /// New value for a property.
+        value: Box<dyn Reflect>,
+    },
+    /// An item needs to be added to a collection property.
+    AddItem {
+        /// New collection item.
+        value: Box<dyn Reflect>,
+    },
+    /// An item needs to be removed from a collection property.
+    RemoveItem {
+        /// Index of an item.
+        index: usize,
+    },
+}
+
+impl PropertyAction {
+    /// Creates action from a field definition. It is recursive action, it traverses the tree
+    /// until there is either FieldKind::Object or FieldKind::Collection. FieldKind::Inspectable
+    /// forces new iteration.
+    pub fn from_field_kind(field_kind: &FieldKind) -> Self {
+        match field_kind {
+            FieldKind::Object(ref value) => Self::Modify {
+                value: value.clone().into_box_reflect(),
+            },
+            FieldKind::Collection(ref collection_changed) => match **collection_changed {
+                CollectionChanged::Add(ref value) => Self::AddItem {
+                    value: value.clone().into_box_reflect(),
+                },
+                CollectionChanged::Remove(index) => Self::RemoveItem { index },
+                CollectionChanged::ItemChanged { ref property, .. } => {
+                    Self::from_field_kind(&property.value)
+                }
+            },
+            FieldKind::Inspectable(ref inspectable) => Self::from_field_kind(&inspectable.value),
+        }
+    }
+
+    /// Tries to apply the action to a given target.
+    pub fn apply(
+        self,
+        path: &str,
+        target: &mut dyn Reflect,
+    ) -> Result<Option<Box<dyn Reflect>>, Self> {
+        match self {
+            PropertyAction::Modify { value } => {
+                if let Ok(field) = target.resolve_path_mut(path) {
+                    if let Err(value) = field.set(value) {
+                        Err(Self::Modify { value })
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Err(Self::Modify { value })
+                }
+            }
+            PropertyAction::AddItem { value } => {
+                if let Ok(field) = target.resolve_path_mut(path) {
+                    if let Some(list) = field.as_list_mut() {
+                        return if let Err(value) = list.reflect_push(value) {
+                            Err(Self::AddItem { value })
+                        } else {
+                            Ok(None)
+                        };
+                    }
+                }
+
+                Err(Self::AddItem { value })
+            }
+            PropertyAction::RemoveItem { index } => {
+                if let Ok(field) = target.resolve_path_mut(path) {
+                    if let Some(list) = field.as_list_mut() {
+                        if let Some(value) = list.reflect_remove(index) {
+                            return Ok(Some(value));
+                        }
+                    }
+                }
+
+                Err(Self::RemoveItem { index })
+            }
+        }
+    }
+}
+
+pub trait Value: Reflect + Debug {
+    fn clone_box(&self) -> Box<dyn Value>;
+
+    fn into_box_reflect(self: Box<Self>) -> Box<dyn Reflect>;
+}
+
+impl<T: Reflect + Clone + Debug> Value for T {
+    fn clone_box(&self) -> Box<dyn Value> {
+        Box::new(self.clone())
+    }
+
+    fn into_box_reflect(self: Box<Self>) -> Box<dyn Reflect> {
+        Box::new(*self.into_any().downcast::<T>().unwrap())
+    }
+}
+
+#[derive(Debug)]
 pub struct ObjectValue {
-    value: Rc<dyn PropertyValue>,
+    pub value: Box<dyn Value>,
+}
+
+impl Clone for ObjectValue {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone_box(),
+        }
+    }
 }
 
 impl PartialEq for ObjectValue {
@@ -91,6 +204,10 @@ impl ObjectValue {
                 true
             })
     }
+
+    pub fn into_box_reflect(self) -> Box<dyn Reflect> {
+        self.value.into_box_reflect()
+    }
 }
 
 impl PartialEq for FieldKind {
@@ -105,9 +222,9 @@ impl PartialEq for FieldKind {
 }
 
 impl FieldKind {
-    pub fn object<T: PropertyValue>(value: T) -> Self {
+    pub fn object<T: Value>(value: T) -> Self {
         Self::Object(ObjectValue {
-            value: Rc::new(value),
+            value: Box::new(value),
         })
     }
 }
@@ -198,6 +315,7 @@ pub struct ContextEntry {
     pub property_owner_type_id: TypeId,
     pub property_editor_definition: Rc<dyn PropertyEditorDefinition>,
     pub property_editor: Handle<UiNode>,
+    pub revert: Handle<UiNode>,
 }
 
 impl PartialEq for ContextEntry {
@@ -336,7 +454,7 @@ fn make_simple_property_container(
     ctx[title].set_tooltip(tooltip);
 
     GridBuilder::new(WidgetBuilder::new().with_child(title).with_child(editor))
-        .add_rows(vec![Row::strict(26.0)])
+        .add_row(Row::auto())
         .add_columns(vec![Column::strict(NAME_COLUMN_WIDTH), Column::stretch()])
         .build(ctx)
 }
@@ -391,18 +509,41 @@ impl InspectorContext {
                                 }
                             };
 
+                            let revert;
+                            let grid = GridBuilder::new(
+                                WidgetBuilder::new().with_child(container).with_child({
+                                    revert = ButtonBuilder::new(
+                                        WidgetBuilder::new()
+                                            .with_visibility(info.is_modified)
+                                            .on_column(1)
+                                            .with_width(16.0)
+                                            .with_height(16.0)
+                                            .with_margin(Thickness::uniform(1.0))
+                                            .with_vertical_alignment(VerticalAlignment::Top),
+                                    )
+                                    .with_text("<")
+                                    .build(ctx);
+                                    revert
+                                }),
+                            )
+                            .add_row(Row::auto())
+                            .add_column(Column::stretch())
+                            .add_column(Column::auto())
+                            .build(ctx);
+
                             entries.push(ContextEntry {
                                 property_editor: editor,
                                 property_editor_definition: definition.clone(),
                                 property_name: info.name.to_string(),
                                 property_owner_type_id: info.owner_type_id,
+                                revert,
                             });
 
                             if info.read_only {
                                 ctx[editor].set_enabled(false);
                             }
 
-                            container
+                            grid
                         }
                         Err(e) => make_simple_property_container(
                             create_header(ctx, info.display_name, layer_index),
@@ -460,23 +601,32 @@ impl InspectorContext {
                 .definitions()
                 .get(&info.value.type_id())
             {
-                let ctx = PropertyEditorMessageContext {
-                    sync_flag: self.sync_flag,
-                    instance: self.find_property_editor(info.name),
-                    ui,
-                    property_info: &info,
-                    definition_container: self.property_definitions.clone(),
-                    layer_index,
-                };
+                if let Some(property_editor) = self.find_property_editor(info.name) {
+                    ui.send_message(WidgetMessage::visibility(
+                        property_editor.revert,
+                        MessageDirection::ToWidget,
+                        info.is_modified,
+                    ));
 
-                match constructor.create_message(ctx) {
-                    Ok(message) => {
-                        if let Some(mut message) = message {
-                            message.flags = self.sync_flag;
-                            ui.send_message(message);
+                    let ctx = PropertyEditorMessageContext {
+                        sync_flag: self.sync_flag,
+                        instance: property_editor.property_editor,
+                        ui,
+                        property_info: &info,
+                        definition_container: self.property_definitions.clone(),
+                        layer_index,
+                        environment: self.environment.clone(),
+                    };
+
+                    match constructor.create_message(ctx) {
+                        Ok(message) => {
+                            if let Some(mut message) = message {
+                                message.flags = self.sync_flag;
+                                ui.send_message(message);
+                            }
                         }
+                        Err(e) => sync_errors.push(e),
                     }
-                    Err(e) => sync_errors.push(e),
                 }
             }
         }
@@ -492,17 +642,14 @@ impl InspectorContext {
         self.entries.iter()
     }
 
-    pub fn find_property_editor(&self, name: &str) -> Handle<UiNode> {
-        if let Some(property_editor) = self
-            .entries
-            .iter()
-            .find(|e| e.property_name == name)
-            .map(|e| e.property_editor)
-        {
-            return property_editor;
-        }
+    pub fn find_property_editor(&self, name: &str) -> Option<&ContextEntry> {
+        self.entries.iter().find(|e| e.property_name == name)
+    }
 
-        Default::default()
+    pub fn find_property_editor_widget(&self, name: &str) -> Handle<UiNode> {
+        self.find_property_editor(name)
+            .map(|e| e.property_editor)
+            .unwrap_or_default()
     }
 }
 

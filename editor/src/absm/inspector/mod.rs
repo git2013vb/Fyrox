@@ -8,7 +8,8 @@ use crate::{
                 SetPoseWeightConstantCommand, SetPoseWeightParameterCommand,
             },
             AbsmCommand, CommandGroup, MovePoseNodeCommand, MoveStateNodeCommand,
-            SetPlayAnimationResourceCommand, SetStateNameCommand, SetTransitionInvertRuleCommand,
+            SetPlayAnimationResourceCommand, SetPlayAnimationSpeedCommand,
+            SetPlayAnimationTimeSliceCommand, SetStateNameCommand, SetTransitionInvertRuleCommand,
             SetTransitionNameCommand, SetTransitionRuleCommand, SetTransitionTimeCommand,
         },
         message::MessageSender,
@@ -25,6 +26,7 @@ use fyrox::{
                 IndexedBlendInputDefinition,
             },
             play::PlayAnimationDefinition,
+            play::TimeSlice,
             BasePoseNodeDefinition, PoseNodeDefinition,
         },
         state::StateDefinition,
@@ -50,7 +52,7 @@ use fyrox::{
     },
     utils::log::Log,
 };
-use std::{any::TypeId, rc::Rc, sync::mpsc::Sender};
+use std::{any::TypeId, ops::Range, rc::Rc, sync::mpsc::Sender};
 
 pub struct Inspector {
     pub window: Handle<UiNode>,
@@ -69,7 +71,7 @@ impl Inspector {
             .with_content(inspector)
             .build(ctx);
 
-        let mut property_editors = make_property_editors_container(sender);
+        let property_editors = make_property_editors_container(sender);
         property_editors
             .insert(InspectablePropertyEditorDefinition::<BasePoseNodeDefinition>::new());
         property_editors.insert(InspectablePropertyEditorDefinition::<
@@ -82,6 +84,8 @@ impl Inspector {
         property_editors
             .insert(VecCollectionPropertyEditorDefinition::<BlendPoseDefinition>::new());
         property_editors.insert(EnumPropertyEditorDefinition::<PoseWeight>::new());
+        property_editors.insert(InspectablePropertyEditorDefinition::<TimeSlice>::new());
+        property_editors.insert(EnumPropertyEditorDefinition::<TimeSlice>::new_optional());
 
         Self {
             window,
@@ -277,11 +281,26 @@ fn handle_play_animation_node_property_changed(
                     value: value.cast_clone()?,
                 }))
             }
+            PlayAnimationDefinition::SPEED => {
+                Some(AbsmCommand::new(SetPlayAnimationSpeedCommand {
+                    handle,
+                    value: value.cast_clone()?,
+                }))
+            }
+            PlayAnimationDefinition::TIME_SLICE => {
+                Some(AbsmCommand::new(SetPlayAnimationTimeSliceCommand {
+                    handle,
+                    value: value.cast_clone()?,
+                }))
+            }
             _ => None,
         },
         FieldKind::Inspectable(ref inner) => match args.name.as_ref() {
             PlayAnimationDefinition::BASE => {
                 handle_base_pose_node_property_changed(inner, handle, node)
+            }
+            PlayAnimationDefinition::TIME_SLICE => {
+                handle_play_animation_time_slice_property_changed(inner, handle)
             }
             _ => None,
         },
@@ -312,7 +331,7 @@ fn handle_blend_animations_by_index_node_property_changed(
         },
         FieldKind::Collection(ref collection_changed) => match args.name.as_ref() {
             BlendAnimationsByIndexDefinition::INPUTS => match **collection_changed {
-                CollectionChanged::Add => Some(AbsmCommand::new(AddInputCommand {
+                CollectionChanged::Add(_) => Some(AbsmCommand::new(AddInputCommand {
                     handle,
                     value: Some(Default::default()),
                 })),
@@ -322,6 +341,7 @@ fn handle_blend_animations_by_index_node_property_changed(
                 CollectionChanged::ItemChanged {
                     index,
                     ref property,
+                    ..
                 } => match property.value {
                     FieldKind::Object(ref value) => match property.name.as_ref() {
                         IndexedBlendInputDefinition::BLEND_TIME => Some(AbsmCommand::new(
@@ -356,7 +376,7 @@ fn handle_blend_animations_node_property_changed(
         },
         FieldKind::Collection(ref collection_changed) => match args.name.as_ref() {
             BlendAnimationsDefinition::POSE_SOURCES => match **collection_changed {
-                CollectionChanged::Add => Some(AbsmCommand::new(AddPoseSourceCommand {
+                CollectionChanged::Add(_) => Some(AbsmCommand::new(AddPoseSourceCommand {
                     handle,
                     value: Some(Default::default()),
                 })),
@@ -366,6 +386,7 @@ fn handle_blend_animations_node_property_changed(
                 CollectionChanged::ItemChanged {
                     index,
                     ref property,
+                    ..
                 } => match property.value {
                     FieldKind::Object(ref value) => match property.name.as_ref() {
                         BlendPoseDefinition::WEIGHT => {
@@ -420,6 +441,22 @@ fn handle_base_pose_node_property_changed(
                 _ => None,
             }
         }
+        _ => None,
+    }
+}
+
+fn handle_play_animation_time_slice_property_changed(
+    args: &PropertyChanged,
+    handle: Handle<PoseNodeDefinition>,
+) -> Option<AbsmCommand> {
+    match args.value {
+        FieldKind::Object(ref value) => match args.name.as_ref() {
+            TimeSlice::F_0 => Some(AbsmCommand::new(SetPlayAnimationTimeSliceCommand {
+                handle,
+                value: Some(TimeSlice(value.cast_clone::<Range<f32>>()?)),
+            })),
+            _ => None,
+        },
         _ => None,
     }
 }

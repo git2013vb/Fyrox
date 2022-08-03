@@ -4,22 +4,22 @@
 //! See [`Listener`] docs for more info.
 
 use crate::{
+    core::variable::InheritError,
     core::{
         inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext},
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
         visitor::prelude::*,
     },
     engine::resource_manager::ResourceManager,
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         node::{Node, NodeTrait, SyncContext, TypeUuidProvider},
-        variable::InheritError,
     },
 };
-use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
 
 /// Listener represents directional microphone-like device. It receives sound from surroundings
@@ -36,7 +36,7 @@ use std::ops::{Deref, DerefMut};
 ///
 /// 2D sound sources (with spatial blend == 0.0) are not influenced by listener's position and
 /// orientation.
-#[derive(Visit, Inspect, Default, Clone, Debug)]
+#[derive(Visit, Inspect, Reflect, Default, Clone, Debug)]
 pub struct Listener {
     base: Base,
 }
@@ -86,9 +86,11 @@ impl NodeTrait for Listener {
         self.base.reset_inheritable_properties();
     }
 
-    fn restore_resources(&mut self, _resource_manager: ResourceManager) {}
+    fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager);
+    }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
     }
 

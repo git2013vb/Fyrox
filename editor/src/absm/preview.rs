@@ -31,7 +31,7 @@ pub struct Previewer {
 
 impl Previewer {
     pub fn new(engine: &mut Engine) -> Self {
-        let panel = PreviewPanel::new(engine, 300, 300);
+        let panel = PreviewPanel::new(engine, 300, 300, false);
 
         let ctx = &mut engine.user_interface.build_ctx();
         let window = WindowBuilder::new(WidgetBuilder::new())
@@ -105,17 +105,16 @@ impl Previewer {
     }
 
     pub fn set_absm(&mut self, engine: &mut Engine, resource: &AbsmResource) {
+        if self.panel.model().is_none() {
+            return;
+        }
+
         if self
             .current_resource
             .as_ref()
             .map_or(false, |current_resource| current_resource == resource)
         {
-            /*
             // Just sync instance to resource.
-            if let Some(machine_instance) = scene.animation_machines.try_get_mut(self.current_absm)
-            {
-                machine_instance.resolve();
-            }*/
             block_on(engine.scenes[self.panel.scene()].resolve(engine.resource_manager.clone()));
         } else {
             self.current_resource = Some(resource.clone());
@@ -123,19 +122,22 @@ impl Previewer {
             // Remove previous machine first (if any).
             self.remove_current_absm(engine);
 
+            let animations = block_on(resource.load_animations(engine.resource_manager.clone()));
+
             // Instantiate new immediately.
-            self.current_absm = block_on(resource.instantiate(
-                self.panel.model(),
-                &mut engine.scenes[self.panel.scene()],
-                engine.resource_manager.clone(),
-            ))
-            .unwrap();
+            self.current_absm = resource
+                .instantiate(
+                    self.panel.model(),
+                    &mut engine.scenes[self.panel.scene()],
+                    animations,
+                )
+                .unwrap();
         }
     }
 
     pub fn set_preview_model(&mut self, engine: &mut Engine, path: &Path, resource: &AbsmResource) {
         // TODO: Implement async loading for this.
-        if block_on(self.panel.load_model(path, engine)) {
+        if block_on(self.panel.load_model(path, false, engine)) {
             self.set_absm(engine, resource)
         }
     }

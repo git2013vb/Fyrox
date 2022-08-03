@@ -3,7 +3,7 @@
 
 use crate::{
     asset::{Resource, ResourceData, ResourceLoadError, ResourceState},
-    core::VecExtensions,
+    core::{futures::future::JoinAll, variable::TemplateVariable, VecExtensions},
     engine::resource_manager::{
         container::{
             entry::{TimedEntry, DEFAULT_RESOURCE_LIFETIME},
@@ -13,7 +13,6 @@ use crate::{
         options::ImportOptions,
         task::TaskPool,
     },
-    scene::variable::TemplateVariable,
     utils::log::Log,
 };
 use std::{future::Future, ops::Deref, path::Path, sync::Arc};
@@ -201,10 +200,18 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            crate::core::futures::executor::block_on(crate::core::futures::future::join_all(
-                self.resources.iter().map(|t| t.value.clone()),
-            ));
+            crate::core::futures::executor::block_on(self.wait_concurrent());
         }
+    }
+
+    /// Waits until all resources are loaded (or failed to load) in concurrent manner.
+    pub fn wait_concurrent(&self) -> JoinAll<T> {
+        crate::core::futures::future::join_all(self.resources())
+    }
+
+    /// Returns a set of resource handled by this container.
+    pub fn resources(&self) -> Vec<T> {
+        self.resources.iter().map(|t| t.value.clone()).collect()
     }
 
     /// Tries to load a resources at a given path.

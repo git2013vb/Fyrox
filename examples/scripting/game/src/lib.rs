@@ -1,154 +1,103 @@
 use crate::bot::Bot;
+use fyrox::event_loop::ControlFlow;
 use fyrox::{
     core::{
-        algebra::{UnitQuaternion, Vector2, Vector3},
+        algebra::{UnitQuaternion, Vector3},
         futures::executor::block_on,
-        inspect::{Inspect, PropertyInfo},
+        reflect::Reflect, inspect::{Inspect, PropertyInfo},
         pool::Handle,
-        uuid::uuid,
-        uuid::Uuid,
+        uuid::{uuid, Uuid},
         visitor::prelude::*,
     },
     event::{DeviceEvent, ElementState, Event, VirtualKeyCode, WindowEvent},
-    fxhash::FxHashMap,
     gui::{
         button::ButtonBuilder,
         inspector::{FieldKind, PropertyChanged},
         widget::WidgetBuilder,
-        UserInterface,
     },
-    plugin::{Plugin, PluginContext, PluginRegistrationContext},
-    renderer::{
-        framework::{error::FrameworkError, gpu_texture::GpuTextureKind},
-        ui_renderer::UiRenderContext,
-        RenderPassStatistics, SceneRenderPass, SceneRenderPassContext,
-    },
+    impl_component_provider,
+    plugin::{Plugin, PluginConstructor, PluginContext, PluginRegistrationContext},
     scene::{
-        camera::Camera, node::Node, node::TypeUuidProvider, rigidbody::RigidBody, Scene,
-        SceneLoader,
+        camera::Camera,
+        graph::map::NodeHandleMap,
+        node::{Node, TypeUuidProvider},
+        rigidbody::RigidBody,
+        Scene, SceneLoader,
     },
     script::{ScriptContext, ScriptTrait},
-    utils::translate_event,
 };
-use std::{cell::RefCell, rc::Rc};
 
 mod bot;
 
+#[derive(Default)]
 pub struct GamePlugin {
-    scene: Handle<Scene>,
-    ui: Rc<RefCell<UserInterface>>,
     debug_draw: bool,
-}
-
-impl Default for GamePlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl GamePlugin {
-    pub fn new() -> Self {
-        Self {
-            scene: Default::default(),
-            ui: Rc::new(RefCell::new(UserInterface::new(Vector2::new(100.0, 100.0)))),
-            debug_draw: false,
-        }
-    }
-}
-
-struct UiRenderPass {
     scene: Handle<Scene>,
-    ui: Rc<RefCell<UserInterface>>,
 }
 
-impl SceneRenderPass for UiRenderPass {
-    fn on_ldr_render(
-        &mut self,
-        ctx: SceneRenderPassContext,
-    ) -> Result<RenderPassStatistics, FrameworkError> {
-        if ctx.scene_handle == self.scene {
-            let mut ui = self.ui.borrow_mut();
+pub struct GameConstructor;
 
-            ctx.ui_renderer.render(UiRenderContext {
-                state: ctx.pipeline_state,
-                viewport: ctx.viewport,
-                frame_buffer: ctx.framebuffer,
-                frame_width: ctx.viewport.size.x as f32,
-                frame_height: ctx.viewport.size.y as f32,
-                drawing_context: ui.draw(),
-                white_dummy: ctx.white_dummy.clone(),
-                texture_cache: ctx.texture_cache,
-            })?;
-        }
+impl PluginConstructor for GameConstructor {
+    fn register(&self, context: PluginRegistrationContext) {
+        let scripts = &context.serialization_context.script_constructors;
 
-        Ok(Default::default())
+        scripts
+            .add::<GameConstructor, Player, _>("Player")
+            .add::<GameConstructor, Jumper, _>("Jumper")
+            .add::<GameConstructor, Bot, _>("Bot");
+    }
+
+    fn create_instance(
+        &self,
+        override_scene: Handle<Scene>,
+        context: PluginContext,
+    ) -> Box<dyn Plugin> {
+        Box::new(GamePlugin::new(override_scene, context))
     }
 }
 
 impl GamePlugin {
-    pub fn set_scene(&mut self, scene: Handle<Scene>, context: PluginContext) {
-        self.scene = scene;
+    fn new(override_scene: Handle<Scene>, context: PluginContext) -> Self {
+        let scene = if override_scene.is_some() {
+            override_scene
+        } else {
+            let scene = block_on(
+                block_on(SceneLoader::from_file(
+                    "data/scene.rgs",
+                    context.serialization_context.clone(),
+                ))
+                .expect("Invalid scene!")
+                .finish(context.resource_manager.clone()),
+            );
+            context.scenes.add(scene)
+        };
 
-        context
-            .renderer
-            .add_render_pass(Rc::new(RefCell::new(UiRenderPass {
-                scene,
-                ui: self.ui.clone(),
-            })));
+        for node in context.scenes[scene].graph.linear_iter_mut() {
+            if let Some(camera) = node.cast_mut::<Camera>() {
+                camera.set_enabled(true);
+            }
+        }
 
-        let mut ui = self.ui.borrow_mut();
-        let ctx = &mut ui.build_ctx();
+        let ctx = &mut context.user_interface.build_ctx();
         ButtonBuilder::new(WidgetBuilder::new().with_width(200.0).with_height(32.0))
             .with_text("Click me")
             .build(ctx);
+
+        Self {
+            scene,
+            debug_draw: true,
+        }
     }
 }
 
-impl TypeUuidProvider for GamePlugin {
+impl TypeUuidProvider for GameConstructor {
     fn type_uuid() -> Uuid {
         uuid!("a9507fb2-0945-4fc1-91ce-115ae7c8a615")
     }
 }
 
 impl Plugin for GamePlugin {
-    fn on_register(&mut self, context: PluginRegistrationContext) {
-        let scripts = &context.serialization_context.script_constructors;
-
-        scripts.add::<GamePlugin, Player, &str>("Player");
-        scripts.add::<GamePlugin, Jumper, &str>("Jumper");
-        scripts.add::<GamePlugin, Bot, &str>("Bot");
-    }
-
-    fn on_standalone_init(&mut self, context: PluginContext) {
-        let mut scene = block_on(
-            block_on(SceneLoader::from_file(
-                "data/scene.rgs",
-                context.serialization_context.clone(),
-            ))
-            .expect("Invalid scene!")
-            .finish(context.resource_manager.clone()),
-        );
-
-        for node in scene.graph.linear_iter_mut() {
-            if let Some(camera) = node.cast_mut::<Camera>() {
-                camera.set_enabled(true);
-            }
-        }
-
-        self.set_scene(context.scenes.add(scene), context);
-    }
-
-    fn on_enter_play_mode(&mut self, scene: Handle<Scene>, context: PluginContext) {
-        self.set_scene(scene, context);
-    }
-
-    fn on_leave_play_mode(&mut self, _context: PluginContext) {
-        self.scene = Handle::NONE;
-    }
-
-    fn on_unload(&mut self, _context: &mut PluginContext) {}
-
-    fn update(&mut self, context: &mut PluginContext) {
+    fn update(&mut self, context: &mut PluginContext, _control_flow: &mut ControlFlow) {
         let scene = &mut context.scenes[self.scene];
 
         if self.debug_draw {
@@ -156,31 +105,10 @@ impl Plugin for GamePlugin {
             drawing_context.clear_lines();
             scene.graph.physics.draw(drawing_context);
         }
-
-        let mut ui = self.ui.borrow_mut();
-
-        if let Some(data) = context.renderer.scene_data_map.get(&self.scene) {
-            if let GpuTextureKind::Rectangle { width, height } =
-                data.ldr_scene_frame_texture().borrow().kind()
-            {
-                ui.update(Vector2::new(width as f32, height as f32), context.dt);
-            }
-        }
-
-        while ui.poll_message().is_some() {}
     }
 
     fn id(&self) -> Uuid {
-        Self::type_uuid()
-    }
-
-    fn on_os_event(&mut self, event: &Event<()>, _context: PluginContext) {
-        if let Event::WindowEvent { event, .. } = event {
-            if let Some(e) = translate_event(event) {
-                let mut ui = self.ui.borrow_mut();
-                ui.process_os_event(&e);
-            }
-        }
+        GameConstructor::type_uuid()
     }
 }
 
@@ -193,21 +121,19 @@ pub struct InputController {
     jump: bool,
 }
 
-#[derive(Visit, Inspect, Debug, Clone)]
+#[derive(Visit, Inspect, Reflect, Debug, Clone)]
 struct Player {
     speed: f32,
     yaw: f32,
-
-    #[visit(optional)]
     pitch: f32,
-
-    #[visit(optional)]
     camera: Handle<Node>,
 
     #[visit(skip)]
     #[inspect(skip)]
     controller: InputController,
 }
+
+impl_component_provider!(Player);
 
 impl Default for Player {
     fn default() -> Self {
@@ -241,24 +167,22 @@ impl ScriptTrait for Player {
         false
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
-        if let Some(camera) = old_new_mapping.get(&self.camera) {
-            self.camera = *camera;
-        }
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
+        old_new_mapping.map(&mut self.camera);
     }
 
     fn on_update(&mut self, context: ScriptContext) {
         let ScriptContext {
-            dt, node, scene, ..
+            dt, handle, scene, ..
         } = context;
 
-        node.local_transform_mut()
-            .set_rotation(UnitQuaternion::from_axis_angle(
-                &Vector3::y_axis(),
-                self.yaw,
-            ));
+        if let Some(body) = scene.graph[handle].cast_mut::<RigidBody>() {
+            body.local_transform_mut()
+                .set_rotation(UnitQuaternion::from_axis_angle(
+                    &Vector3::y_axis(),
+                    self.yaw,
+                ));
 
-        if let Some(body) = node.cast_mut::<RigidBody>() {
             let look_vector = body
                 .look_vector()
                 .try_normalize(f32::EPSILON)
@@ -350,7 +274,7 @@ impl ScriptTrait for Player {
     }
 
     fn plugin_uuid(&self) -> Uuid {
-        GamePlugin::type_uuid()
+        GameConstructor::type_uuid()
     }
 
     fn id(&self) -> Uuid {
@@ -358,13 +282,13 @@ impl ScriptTrait for Player {
     }
 }
 
-#[derive(Visit, Inspect, Debug, Clone)]
+#[derive(Visit, Inspect, Reflect, Debug, Clone)]
 struct Jumper {
     timer: f32,
-
-    #[visit(optional)]
     period: f32,
 }
+
+impl_component_provider!(Jumper);
 
 impl Default for Jumper {
     fn default() -> Self {
@@ -396,7 +320,7 @@ impl ScriptTrait for Jumper {
     fn on_init(&mut self, _context: ScriptContext) {}
 
     fn on_update(&mut self, context: ScriptContext) {
-        if let Some(rigid_body) = context.node.cast_mut::<RigidBody>() {
+        if let Some(rigid_body) = context.scene.graph[context.handle].cast_mut::<RigidBody>() {
             if self.timer > self.period {
                 rigid_body.apply_force(Vector3::new(0.0, 200.0, 0.0));
                 self.timer = 0.0;
@@ -411,6 +335,6 @@ impl ScriptTrait for Jumper {
     }
 
     fn plugin_uuid(&self) -> Uuid {
-        GamePlugin::type_uuid()
+        GameConstructor::type_uuid()
     }
 }

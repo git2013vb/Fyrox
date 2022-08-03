@@ -1,3 +1,109 @@
+# 0.27 (WIP)
+
+- Backward compatibility for native engine data formats was dropped - use FyroxEd 0.13 to convert your scenes to newer
+version.
+- Fixed panic when loading an FBX model with malformed animation curves (when there is only 1 or 2 components animated
+instead of 3, X and Y, but not Z for example).
+- ABSM editor now have smaller default size and fits on small screens.
+- Asset previewer now plays model animations
+- Fixed critical FBX importer bug, that caused malformed animations.
+- Ability to define "playable" time slice for animations.
+- Fixed editor update rate, previously it was very high and that caused some weird issues.
+- Proper support for all resource types in Inspector
+- Show ABSM resources in the asset browser
+- Ability to edit sound import options in the asset browser
+- Dynamic type casting for script instances
+- Provide access to parameters in ABSM
+- Fixed transition instantiation in ABSM - it incorrectly handled "invert rule" flag.
+- Prevent panic when deleting a node from script methods.
+- Dynamic type casting for plugin instances
+- Two-step ABSM instantiation - at first step you load all animations in parallel (async) and on second step you
+create actual ABSM instance.
+- Wait for all resources to load before initialize scripts - this prevents panicking when trying to access
+not yet loaded resource in script methods.
+- Default instantiation scaling options for 3D models - allows you to scale 3D models automatically on instantiation.
+- Graph event broadcaster - allows you to receive `Added` and `Removed` events for nodes.
+- Correctly initialize scripts of nodes that created at runtime.
+- Component provider for scripts - allows you to provide access to inner script components via unified interface.
+- Disable automatic texture compression - having compression enabled for all kinds of textures is not good, because
+there could be some textures with gradients, and they'll have significant distortion.
+- `Pool::drain` - allows you to remove all objects from a pool while processing every object via closure.
+- `Script::on_deinit` - allows you to execute any code for cleanup.
+- Added `NodeHandleMap` - a small wrapper over map that have some methods that makes node handle mapping much 
+shorter.
+- Correctly handle missing properties in Inspector for various objects.
+- Provide access to main application window from plugins.
+- Allow chaining `ScriptConstructorContainer::add` calls
+- Removed `screen_size` parameter from `UserInterface::new`
+- Ability to remove render passes.
+- Run the game in a separate process from the editor.
+- Provide access to default engine's user interface instance for plugins.
+- `--override-scene` parameter for Executor
+- `ButtonContent` improvements - it is now possible to re-create button's text field using `ButtonMessage::Content`
+- Provide access to control flow switch for plugins.
+- `Plugin::on_ui_message`
+- Two-step plugins initialization:
+  - `PluginConstructor` trait defines a method that creates an instance of `Plugin` trait, instance of plugin
+    constructor is used to create plugins on demand. It is needed because engine has deferred plugin initialization.
+- `Framework` is removed, its functionality was merged with plugins.
+- Simplified `ScriptConstructorContainer::add` definition, there were redundant generic parameters that just add
+visual clutter.
+- Implemented `Clone+Debug` traits for `NavmeshAgent`
+- Fixed spam in log in the editor when any file was changed.
+- High DPI screens support for the editor.
+- Newly created cameras in the editor are now enabled by default.
+- Added "Preview" option for cameras in world viewer.
+- Refactored joints:
+  - Joints binding now is fully automatic and it is based on world transform of the joint, no need to manually
+    set local frames.
+  - Rebinding happens when a joint changes its position
+  - Joints editing in the editor is now much more intuitive
+- Improved debug visualization for physics.
+- Read-only mode for NumericUpDown and Vec2/Vec3/Vec4 widgets
+- Show global coordinates of current selection in the scene previewer
+- BitField widget - it helps you to edit numbers as bit containers, allowing you to switch separate bits
+- More compact editors for properties in Inspector
+- NumericUpDown widget does not use word wrapping by default anymore
+- CheckBox widget can now be switched only by left mouse button
+- Ability to disable contacts between connected bodies of a joint
+- `style` parameter for project template generator - it defines which scene will be used by default - either `2d` 
+or `3d`
+- Ability to select portion of the texture to render in `Rectangle` nodes.
+- Ability to generate script skeleton for template generator
+- HSL color model
+- Ability to copy log enties to the clipboard
+- `Log` API improvements
+- Visualize cameras in the editor
+- Context menu for asset items, it is now possible to open, delete, show-in-explorer items and also
+to copy file name and full file path to the clipboard.
+
+# 0.26
+
+This release is mostly to fix critical bugs of 0.25 and add missing functionality that stops you from using scripting
+system.
+
+- Added project template generator
+- Fixed invisible selected item in drop-down list widget.
+- Correctly sync node names in `World Viewer`
+- Reset editor's camera projection mode switch when creating new scene
+- Fixed doubling scene entities in `World Viewer` when loading scene via `StartupData`
+- More logging for renderer
+- Fixed shader cache - now the engine won't re-compile shaders each 20 seconds.
+- Temporarily disable `Lifetime` property editing because it causes crashes
+- Do not show `dirty` flag of `Transform` in the `Inspector`
+- Provide access to property editors container for editor's `Inspector` - it is now possible
+to register your own property editors
+- Fixed panic when syncing `Inspector` for an entity with `Option<Texture>` field.
+- Added `handle_object_property_changed` and `handle_collection_property_changed` macros to reduce 
+boilerplate code in script property handling.
+- Added ability to restore resource handles for scripts
+- Fixed selection visualization in `Asset Browser`
+- Validation for sky box cube map generator
+
+## Migration guide
+
+There are no breaking changes in this release.
+
 # 0.25
 
 - Static plugin system

@@ -1,6 +1,6 @@
 [package]
 name = "fyrox"
-version = "0.25.0"
+version = "0.26.0"
 authors = ["Dmitry Stepanov <d1maxa@yandex.ru>"]
 edition = "2021"
 license = "MIT"
@@ -24,7 +24,8 @@ members = [
     "fyrox-resource",
     "examples/wasm",
 	"editor",
-    "editor-standalone"
+    "editor-standalone",
+	"template"
 ]
 exclude = ["examples/scripting"]
 
@@ -38,10 +39,10 @@ debug = true
 [dependencies]
 fyrox-core = { path = "fyrox-core", version = "0.20.0", features = ["serde"] }
 fyrox-sound = { path = "fyrox-sound", version = "0.27.0" }
-fyrox-ui = { path = "fyrox-ui", version = "0.16.0" }
+fyrox-ui = { path = "fyrox-ui", version = "0.17.0" }
 fyrox-resource = { path = "fyrox-resource", version = "0.4.0" }
-rapier2d = "0.12"
-rapier3d = "0.12"
+rapier2d = { version = "0.14", features = ["debug-render"] }
+rapier3d = { version = "0.14", features = ["debug-render"] }
 image = { version = "0.24.1", default-features = false, features = ["gif", "jpeg", "png", "tga", "tiff", "bmp"] }
 inflate = "0.4.5"
 serde = { version = "1", features = ["derive"] }
@@ -58,6 +59,7 @@ fxhash = "0.2.1"
 strum = "0.24.0"
 strum_macros = "0.24.0"
 notify = "4.0"
+clap = { version = "3.1.18", features = ["derive"] }
 
 [features]
 enable_profiler = ["fyrox-core/enable_profiler"]

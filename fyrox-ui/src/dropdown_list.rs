@@ -100,7 +100,7 @@ impl Control for DropdownList {
                         ui.send_message(WidgetMessage::width(
                             self.popup,
                             MessageDirection::ToWidget,
-                            self.actual_size().x,
+                            self.actual_local_size().x,
                         ));
                         ui.send_message(PopupMessage::placement(
                             self.popup,
@@ -158,6 +158,7 @@ impl Control for DropdownList {
                                         MessageDirection::ToWidget,
                                         self.main_grid,
                                     ));
+                                    ui.node(self.current).request_update_visibility();
                                 } else {
                                     self.current = Handle::NONE;
                                 }

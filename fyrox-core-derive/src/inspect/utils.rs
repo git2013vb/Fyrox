@@ -1,7 +1,5 @@
 // NOTE: The `properties` impl does NOT use Self::PROP_KEY constants, but it's always safe
 
-mod prop_keys;
-
 use convert_case::*;
 use darling::ast;
 use proc_macro2::TokenStream as TokenStream2;
@@ -97,13 +95,9 @@ impl FieldPrefix {
         }
     }
 
-    fn property_key_name(
-        &self,
-        name: Option<String>,
-        nth_field: usize,
-        field: &args::FieldArgs,
-    ) -> String {
-        let name = name.unwrap_or_else(|| match self.style {
+    // FIXME: Use shared function between `Inspect` and `Reflect`
+    fn property_key_name(&self, nth_field: usize, field: &args::FieldArgs) -> String {
+        let name = match self.style {
             ast::Style::Struct => {
                 format!("{}", field.ident.as_ref().unwrap())
             }
@@ -113,10 +107,10 @@ impl FieldPrefix {
             ast::Style::Unit => {
                 unreachable!()
             }
-        });
+        };
 
         if let Some(variant) = &self.variant {
-            format!("{}.{}", variant.ident, name)
+            format!("{}@{}", variant.ident, name)
         } else {
             name
         }
@@ -129,11 +123,9 @@ pub fn create_inspect_impl<'f>(
     field_args: impl Iterator<Item = &'f args::FieldArgs>,
     impl_body: TokenStream2,
 ) -> TokenStream2 {
-    let prop_keys_impl = prop_keys::prop_keys_impl(ty_args);
     let trait_impl = self::inspect_trait_impl(ty_args, field_args, impl_body);
 
     quote! {
-        #prop_keys_impl
         #trait_impl
     }
 }
@@ -214,14 +206,13 @@ fn quote_field_prop(
     let getter = match &field.getter {
         // use custom getter function to retrieve the target reference
         Some(getter) => {
-            let getter: Path = parse_str(getter).expect("can't parse `getter` as a path");
-            quote! { #getter(#field_ref) }
+            quote! { #field_ref.#getter }
         }
         // default: get reference of the field
         None => field_ref.clone(),
     };
 
-    let prop_key_name = field_prefix.property_key_name(field.name.clone(), nth_field, field);
+    let prop_key_name = field_prefix.property_key_name(nth_field, field);
 
     // consider #[inspect(display_name = ..)]
     let display_name = field
@@ -256,8 +247,7 @@ fn quote_field_prop(
 
     let is_modified = match field.is_modified.as_ref() {
         Some(getter) => {
-            let getter: Path = parse_str(getter).expect("can't parse `is_modified` as a path");
-            quote! { #field_ref.#getter() }
+            quote! { #field_ref.#getter }
         }
         None => quote! { false },
     };

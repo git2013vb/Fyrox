@@ -1,30 +1,32 @@
 //! Scene physics module.
 
 use crate::{
-    core::algebra::Vector2,
     core::{
-        algebra::{Isometry2, Matrix4, Point2, Translation2, UnitComplex, UnitQuaternion, Vector3},
-        algebra::{Isometry3, Point3, Rotation3, Translation3},
+        algebra::{
+            Isometry2, Isometry3, Matrix4, Point2, Rotation3, Translation2, Translation3,
+            UnitComplex, UnitQuaternion, Vector2, Vector3,
+        },
         arrayvec::ArrayVec,
-        color::Color,
         inspect::{Inspect, PropertyInfo},
         instant,
         math::Matrix4Ext,
+        parking_lot::Mutex,
         pool::Handle,
+        reflect::Reflect,
+        variable::VariableFlags,
         visitor::prelude::*,
         BiDirHashMap,
     },
     scene::{
         self,
         collider::{self},
-        debug::{Line, SceneDrawingContext},
-        dim2::{self, collider::ColliderShape, rigidbody::ApplyAction},
+        debug::SceneDrawingContext,
+        dim2::{self, collider::ColliderShape, joint::JointParams, rigidbody::ApplyAction},
         graph::{
             physics::{FeatureId, IntegrationParameters, PhysicsPerformanceStatistics},
             NodePool,
         },
-        node::Node,
-        variable::VariableFlags,
+        node::{Node, NodeTrait},
     },
     utils::log::{Log, MessageKind},
 };
@@ -32,15 +34,14 @@ use rapier2d::{
     dynamics::{
         CCDSolver, GenericJoint, GenericJointBuilder, ImpulseJointHandle, ImpulseJointSet,
         IslandManager, JointAxesMask, JointAxis, MultibodyJointHandle, MultibodyJointSet,
-        RevoluteJointBuilder, RigidBody, RigidBodyActivation, RigidBodyBuilder, RigidBodyHandle,
-        RigidBodySet, RigidBodyType,
+        RigidBody, RigidBodyActivation, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
+        RigidBodyType,
     },
     geometry::{
         BroadPhase, Collider, ColliderBuilder, ColliderHandle, ColliderSet, Cuboid,
-        InteractionGroups, NarrowPhase, Ray, SharedShape, TriMesh,
+        InteractionGroups, NarrowPhase, Ray, SharedShape,
     },
-    math::UnitVector,
-    pipeline::{EventHandler, PhysicsPipeline, QueryPipeline},
+    pipeline::{DebugRenderPipeline, EventHandler, PhysicsPipeline, QueryFilter, QueryPipeline},
 };
 use std::{
     cell::RefCell,
@@ -198,40 +199,40 @@ where
     map: BiDirHashMap<A, Handle<Node>>,
 }
 
-fn convert_joint_params(params: scene::dim2::joint::JointParams) -> GenericJoint {
+fn convert_joint_params(
+    params: scene::dim2::joint::JointParams,
+    local_frame1: Isometry2<f32>,
+    local_frame2: Isometry2<f32>,
+) -> GenericJoint {
+    let locked_axis = match params {
+        JointParams::BallJoint(_) => JointAxesMask::LOCKED_REVOLUTE_AXES,
+        JointParams::FixedJoint(_) => JointAxesMask::LOCKED_FIXED_AXES,
+        JointParams::PrismaticJoint(_) => JointAxesMask::LOCKED_PRISMATIC_AXES,
+    };
+
+    let mut joint = GenericJointBuilder::new(locked_axis)
+        .local_frame1(local_frame1)
+        .local_frame2(local_frame2)
+        .build();
+
     match params {
-        scene::dim2::joint::JointParams::BallJoint(v) => RevoluteJointBuilder::new()
-            .local_anchor1(Point2::from(v.local_anchor1))
-            .local_anchor2(Point2::from(v.local_anchor2))
-            .limits(v.limits_angles)
-            .build()
-            .into(),
-        scene::dim2::joint::JointParams::FixedJoint(v) => {
-            GenericJointBuilder::new(JointAxesMask::LOCKED_FIXED_AXES)
-                .local_frame1(Isometry2 {
-                    translation: Translation2 {
-                        vector: v.local_anchor1_translation,
-                    },
-                    rotation: v.local_anchor1_rotation,
-                })
-                .local_frame2(Isometry2 {
-                    translation: Translation2 {
-                        vector: v.local_anchor2_translation,
-                    },
-                    rotation: v.local_anchor2_rotation,
-                })
-                .build()
+        scene::dim2::joint::JointParams::BallJoint(v) => {
+            if v.limits_enabled {
+                joint.set_limits(
+                    JointAxis::AngX,
+                    [v.limits_angles.start, v.limits_angles.end],
+                );
+            }
         }
+        scene::dim2::joint::JointParams::FixedJoint(_) => {}
         scene::dim2::joint::JointParams::PrismaticJoint(v) => {
-            GenericJointBuilder::new(JointAxesMask::LOCKED_PRISMATIC_AXES)
-                .local_anchor1(Point2::from(v.local_anchor1))
-                .local_axis1(UnitVector::new_normalize(v.local_axis1))
-                .local_anchor2(Point2::from(v.local_anchor2))
-                .local_axis2(UnitVector::new_normalize(v.local_axis2))
-                .limits(JointAxis::X, v.limits)
-                .build()
+            if v.limits_enabled {
+                joint.set_limits(JointAxis::X, [v.limits.start, v.limits.end]);
+            }
         }
     }
+
+    joint
 }
 
 // Converts descriptor in a shared shape.
@@ -277,7 +278,7 @@ fn isometry2_to_mat4(isometry: &Isometry2<f32>) -> Matrix4<f32> {
 /// Physics world is responsible for physics simulation in the engine. There is a very few public
 /// methods, mostly for ray casting. You should add physical entities using scene graph nodes, such
 /// as RigidBody, Collider, Joint.
-#[derive(Visit, Inspect)]
+#[derive(Visit, Inspect, Reflect)]
 pub struct PhysicsWorld {
     /// A flag that defines whether physics simulation is enabled or not.
     pub enabled: bool,
@@ -291,52 +292,68 @@ pub struct PhysicsWorld {
     /// Performance statistics of a single simulation step.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub performance_statistics: PhysicsPerformanceStatistics,
 
     // Current physics pipeline.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     pipeline: PhysicsPipeline,
     // Broad phase performs rough intersection checks.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     broad_phase: BroadPhase,
     // Narrow phase is responsible for precise contact generation.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     narrow_phase: NarrowPhase,
     // A continuous collision detection solver.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     ccd_solver: CCDSolver,
     // Structure responsible for maintaining the set of active rigid-bodies, and putting non-moving
     // rigid-bodies to sleep to save computation times.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     islands: IslandManager,
     // A container of rigid bodies.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     bodies: Container<RigidBodySet, RigidBodyHandle>,
     // A container of colliders.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     colliders: Container<ColliderSet, ColliderHandle>,
     // A container of impulse joints.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     joints: Container<ImpulseJointSet, ImpulseJointHandle>,
     // A container of multibody joints.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     multibody_joints: Container<MultibodyJointSet, MultibodyJointHandle>,
     // Event handler collects info about contacts and proximity events.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     event_handler: Box<dyn EventHandler>,
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     query: RefCell<QueryPipeline>,
+    #[visit(skip)]
+    #[inspect(skip)]
+    #[reflect(hidden)]
+    debug_render_pipeline: Mutex<DebugRenderPipeline>,
 }
 
 fn isometry_from_global_transform(transform: &Matrix4<f32>) -> Isometry2<f32> {
@@ -346,6 +363,19 @@ fn isometry_from_global_transform(transform: &Matrix4<f32>) -> Isometry2<f32> {
             Rotation3::from_matrix(&transform.basis()).euler_angles().2,
         ),
     }
+}
+
+fn calculate_local_frames(
+    joint: &dyn NodeTrait,
+    body1: &dyn NodeTrait,
+    body2: &dyn NodeTrait,
+) -> (Isometry2<f32>, Isometry2<f32>) {
+    let joint_isometry = isometry_from_global_transform(&joint.global_transform());
+
+    (
+        joint_isometry * isometry_from_global_transform(&body1.global_transform()).inverse(),
+        joint_isometry * isometry_from_global_transform(&body2.global_transform()).inverse(),
+    )
 }
 
 impl PhysicsWorld {
@@ -379,6 +409,7 @@ impl PhysicsWorld {
             event_handler: Box::new(()),
             query: RefCell::new(Default::default()),
             performance_statistics: Default::default(),
+            debug_render_pipeline: Default::default(),
         }
     }
 
@@ -485,91 +516,27 @@ impl PhysicsWorld {
         body2: RigidBodyHandle,
         params: GenericJoint,
     ) -> ImpulseJointHandle {
-        let handle = self.joints.set.insert(body1, body2, params);
+        let handle = self.joints.set.insert(body1, body2, params, false);
         self.joints.map.insert(handle, owner);
         handle
     }
 
     pub(crate) fn remove_joint(&mut self, handle: ImpulseJointHandle) {
         assert!(self.joints.map.remove_by_key(&handle).is_some());
-        self.joints
-            .set
-            .remove(handle, &mut self.islands, &mut self.bodies.set, false);
+        self.joints.set.remove(handle, false);
     }
 
     /// Draws physics world. Very useful for debugging, it allows you to see where are
     /// rigid bodies, which colliders they have and so on.
     pub fn draw(&self, context: &mut SceneDrawingContext) {
-        for (_, body) in self.bodies.set.iter() {
-            context.draw_transform(isometry2_to_mat4(body.position()));
-        }
-
-        for (_, collider) in self.colliders.set.iter() {
-            let body = self.bodies.set.get(collider.parent().unwrap()).unwrap();
-            let collider_local_transform =
-                isometry2_to_mat4(collider.position_wrt_parent().unwrap());
-            let transform = isometry2_to_mat4(body.position()) * collider_local_transform;
-            if let Some(trimesh) = collider.shape().as_trimesh() {
-                let trimesh: &TriMesh = trimesh;
-                for triangle in trimesh.triangles() {
-                    let a = transform
-                        .transform_point(&Point3::from(triangle.a.to_homogeneous()))
-                        .coords;
-                    let b = transform
-                        .transform_point(&Point3::from(triangle.b.to_homogeneous()))
-                        .coords;
-                    let c = transform
-                        .transform_point(&Point3::from(triangle.c.to_homogeneous()))
-                        .coords;
-                    context.draw_triangle(a, b, c, Color::opaque(200, 200, 200));
-                }
-            } else if let Some(cuboid) = collider.shape().as_cuboid() {
-                context.draw_rectangle(
-                    cuboid.half_extents.x,
-                    cuboid.half_extents.y,
-                    transform,
-                    Color::opaque(200, 200, 200),
-                );
-            } else if let Some(ball) = collider.shape().as_ball() {
-                context.draw_circle(
-                    body.position().translation.vector.to_homogeneous(),
-                    ball.radius,
-                    10,
-                    transform,
-                    Color::opaque(200, 200, 200),
-                );
-            } else if let Some(triangle) = collider.shape().as_triangle() {
-                context.draw_triangle(
-                    triangle.a.to_homogeneous(),
-                    triangle.b.to_homogeneous(),
-                    triangle.c.to_homogeneous(),
-                    Color::opaque(200, 200, 200),
-                );
-            } else if let Some(capsule) = collider.shape().as_capsule() {
-                context.draw_segment_flat_capsule(
-                    capsule.segment.a.coords,
-                    capsule.segment.b.coords,
-                    capsule.radius,
-                    10,
-                    transform,
-                    Color::opaque(200, 200, 200),
-                );
-            } else if let Some(heightfield) = collider.shape().as_heightfield() {
-                for segment in heightfield.segments() {
-                    let a = transform
-                        .transform_point(&Point3::from(segment.a.to_homogeneous()))
-                        .coords;
-                    let b = transform
-                        .transform_point(&Point3::from(segment.b.to_homogeneous()))
-                        .coords;
-                    context.add_line(Line {
-                        begin: a,
-                        end: b,
-                        color: Color::opaque(200, 200, 200),
-                    });
-                }
-            }
-        }
+        self.debug_render_pipeline.lock().render(
+            context,
+            &self.bodies.set,
+            &self.colliders.set,
+            &self.joints.set,
+            &self.multibody_joints.set,
+            &self.narrow_phase,
+        );
     }
 
     /// Casts a ray with given options.
@@ -593,12 +560,15 @@ impl PhysicsWorld {
                 .unwrap_or_default(),
         );
         query.intersections_with_ray(
+            &self.bodies.set,
             &self.colliders.set,
             &ray,
             opts.max_len,
             true,
-            InteractionGroups::new(opts.groups.memberships, opts.groups.filter),
-            None, // TODO
+            QueryFilter::new().groups(InteractionGroups::new(
+                opts.groups.memberships.0,
+                opts.groups.filter.0,
+            )),
             |handle, intersection| {
                 query_buffer.push(Intersection {
                     collider: self.colliders.map.value_of(&handle).cloned().unwrap(),
@@ -730,7 +700,7 @@ impl PhysicsWorld {
                         .translation_locked
                         .try_sync_model(|v| native.lock_translations(v, false));
                     rigid_body_node.rotation_locked.try_sync_model(|v| {
-                        native.restrict_rotations(!v, !v, !v, false);
+                        native.set_enabled_rotations(!v, !v, !v, false);
                     });
                     rigid_body_node
                         .dominance
@@ -780,7 +750,7 @@ impl PhysicsWorld {
 
             let mut body = builder.build();
 
-            body.restrict_rotations(
+            body.set_enabled_rotations(
                 !rigid_body_node.is_rotation_locked(),
                 !rigid_body_node.is_rotation_locked(),
                 !rigid_body_node.is_rotation_locked(),
@@ -836,10 +806,14 @@ impl PhysicsWorld {
                         .restitution
                         .try_sync_model(|v| native.set_restitution(v));
                     collider_node.collision_groups.try_sync_model(|v| {
-                        native.set_collision_groups(InteractionGroups::new(v.memberships, v.filter))
+                        native.set_collision_groups(InteractionGroups::new(
+                            v.memberships.0,
+                            v.filter.0,
+                        ))
                     });
                     collider_node.solver_groups.try_sync_model(|v| {
-                        native.set_solver_groups(InteractionGroups::new(v.memberships, v.filter))
+                        native
+                            .set_solver_groups(InteractionGroups::new(v.memberships.0, v.filter.0))
                     });
                     collider_node
                         .friction
@@ -874,14 +848,14 @@ impl PhysicsWorld {
                         .friction(collider_node.friction())
                         .restitution(collider_node.restitution())
                         .collision_groups(InteractionGroups::new(
-                            collider_node.collision_groups().memberships,
-                            collider_node.collision_groups().filter,
+                            collider_node.collision_groups().memberships.0,
+                            collider_node.collision_groups().filter.0,
                         ))
                         .friction_combine_rule(collider_node.friction_combine_rule().into())
                         .restitution_combine_rule(collider_node.restitution_combine_rule().into())
                         .solver_groups(InteractionGroups::new(
-                            collider_node.solver_groups().memberships,
-                            collider_node.solver_groups().filter,
+                            collider_node.solver_groups().memberships.0,
+                            collider_node.solver_groups().filter.0,
                         ))
                         .sensor(collider_node.is_sensor());
 
@@ -913,9 +887,6 @@ impl PhysicsWorld {
         joint: &scene::dim2::joint::Joint,
     ) {
         if let Some(native) = self.joints.set.get_mut(joint.native.get()) {
-            joint
-                .params
-                .try_sync_model(|v| native.data = convert_joint_params(v));
             joint.body1.try_sync_model(|v| {
                 if let Some(rigid_body_node) = nodes
                     .try_borrow(v)
@@ -932,6 +903,29 @@ impl PhysicsWorld {
                     native.body2 = rigid_body_node.native.get();
                 }
             });
+            joint.params.try_sync_model(|v| {
+                native.data =
+                    // Preserve local frames.
+                    convert_joint_params(v, native.data.local_frame1, native.data.local_frame2)
+            });
+            joint.contacts_enabled.try_sync_model(|v| {
+                native.data.set_contacts_enabled(v);
+            });
+            if joint.need_rebind.get() {
+                if let (Some(body1), Some(body2)) = (
+                    nodes
+                        .try_borrow(joint.body1())
+                        .and_then(|n| n.cast::<scene::rigidbody::RigidBody>()),
+                    nodes
+                        .try_borrow(joint.body2())
+                        .and_then(|n| n.cast::<scene::rigidbody::RigidBody>()),
+                ) {
+                    let (local_frame1, local_frame2) = calculate_local_frames(joint, body1, body2);
+                    native.data =
+                        convert_joint_params((*joint.params).clone(), local_frame1, local_frame2);
+                    joint.need_rebind.set(false);
+                }
+            }
         } else {
             let body1_handle = joint.body1();
             let body2_handle = joint.body2();
@@ -946,17 +940,22 @@ impl PhysicsWorld {
                     .try_borrow(body2_handle)
                     .and_then(|n| n.cast::<dim2::rigidbody::RigidBody>()),
             ) {
+                // Calculate local frames first.
+                let (local_frame1, local_frame2) = calculate_local_frames(joint, body1, body2);
+
                 let native_body1 = body1.native.get();
                 let native_body2 = body2.native.get();
 
-                let native = self.add_joint(
-                    handle,
-                    native_body1,
-                    native_body2,
-                    convert_joint_params(params),
-                );
+                assert!(self.bodies.set.get(native_body1).is_some());
+                assert!(self.bodies.set.get(native_body2).is_some());
 
-                joint.native.set(native);
+                let mut native_joint = convert_joint_params(params, local_frame1, local_frame2);
+                native_joint.contacts_enabled = joint.is_contacts_enabled();
+                let native_handle =
+                    self.add_joint(handle, native_body1, native_body2, native_joint);
+
+                joint.native.set(native_handle);
+                joint.need_rebind.set(false);
 
                 Log::writeln(
                     MessageKind::Information,

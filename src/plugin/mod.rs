@@ -3,40 +3,63 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::pool::Handle,
-    core::uuid::Uuid,
+    core::{pool::Handle, uuid::Uuid},
     engine::{resource_manager::ResourceManager, SerializationContext},
     event::Event,
+    event_loop::ControlFlow,
+    gui::{message::UiMessage, UserInterface},
     renderer::Renderer,
     scene::{Scene, SceneContainer},
+    window::Window,
 };
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
+
+/// Plugin constructor is a first step of 2-stage plugin initialization. It is responsible for plugin script
+/// registration and for creating actual plugin instance.
+///
+/// # Details
+///
+/// Why there is a need in 2-state initialization? The editor requires it, it is interested only in plugin
+/// scripts so editor does not create any plugin instances, it just uses [Self::register] to obtain information
+/// about scripts.  
+pub trait PluginConstructor {
+    /// The method is called when the plugin constructor was just registered in the engine. The main use of the
+    /// method is to register scripts and custom scene graph nodes in [`SerializationContext`].
+    fn register(&self, #[allow(unused_variables)] context: PluginRegistrationContext) {}
+
+    /// The method is called when the engine creates plugin instances. It allows to create initialized plugin
+    /// instance.
+    ///
+    /// # Important notes
+    ///
+    /// `override_scene` is a handle to an override scene that is currently active. It is used only in editor
+    /// when you enter play mode, on other cases it is `Handle::NONE`.
+    fn create_instance(
+        &self,
+        #[allow(unused_variables)] override_scene: Handle<Scene>,
+        context: PluginContext,
+    ) -> Box<dyn Plugin>;
+}
 
 /// Contains plugin environment for the registration stage.
-pub struct PluginRegistrationContext {
+pub struct PluginRegistrationContext<'a> {
     /// A reference to serialization context of the engine. See [`SerializationContext`] for more
     /// info.
-    pub serialization_context: Arc<SerializationContext>,
+    pub serialization_context: &'a Arc<SerializationContext>,
 }
 
 /// Contains plugin environment.
 pub struct PluginContext<'a> {
-    /// `true` if  the plugin running under the editor, `false` - otherwise.
-    pub is_in_editor: bool,
-
     /// A reference to scene container of the engine. You can add new scenes from [`Plugin`] methods
     /// by using [`SceneContainer::add`].
-    ///
-    /// # Important notes
-    ///
-    /// Do not clear this container when running your plugin in the editor, otherwise you'll get
-    /// panic. Every scene that was added in the container while "play mode" in the editor was
-    /// active will be removed when you leave play mode.
     pub scenes: &'a mut SceneContainer,
 
     /// A reference to the resource manager, it can be used to load various resources and manage
     /// them. See [`ResourceManager`] docs for more info.
     pub resource_manager: &'a ResourceManager,
+
+    /// A reference to user interface instance.
+    pub user_interface: &'a mut UserInterface,
 
     /// A reference to the renderer, it can be used to add custom render passes (for example to
     /// render custom effects and so on).
@@ -48,44 +71,47 @@ pub struct PluginContext<'a> {
 
     /// A reference to serialization context of the engine. See [`SerializationContext`] for more
     /// info.
-    pub serialization_context: Arc<SerializationContext>,
+    pub serialization_context: &'a Arc<SerializationContext>,
+
+    /// A reference to the main application window.
+    pub window: &'a Window,
+}
+
+/// Base plugin automatically implements type casting for plugins.
+pub trait BasePlugin: Any + 'static {
+    /// Returns a reference to Any trait. It is used for type casting.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Returns a reference to Any trait. It is used for type casting.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T> BasePlugin for T
+where
+    T: Any + Plugin + 'static,
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl dyn Plugin {
+    /// Performs downcasting to a particular type.
+    pub fn cast<T: Plugin>(&self) -> Option<&T> {
+        self.as_any().downcast_ref::<T>()
+    }
+
+    /// Performs downcasting to a particular type.
+    pub fn cast_mut<T: Plugin>(&mut self) -> Option<&mut T> {
+        self.as_any_mut().downcast_mut::<T>()
+    }
 }
 
 /// Plugin is a convenient interface that allow you to extend engine's functionality.
-///
-/// # Engine vs Framework
-///
-/// There are two completely different approaches that could be used to use the engine: you either
-/// use the engine in "true" engine mode, or use it in framework mode. The "true" engine mode fixes
-/// high-level structure of your game and forces you to implement game logic inside plugins and
-/// scripts. The framework mode provides low-level access to engine details and leaves implementation
-/// details to you.
-///
-/// By default the engine, if used alone, **completely ignores** every plugin, it calls a few methods
-/// ([`Plugin::on_register`], [`Plugin::on_standalone_init`]) and does not call any other methods.
-/// The plugins are meant to be used only in "true" engine mode. If you're using the engine alone
-/// (without the editor, executor, and required project structure), it means that you're using the
-/// engine in **framework** mode and you're able to setup your project as you want.
-///
-/// The plugins managed either by `Executor` or the editor (`Fyroxed`). The first one is a small
-/// framework that calls all methods of the plugin as it needs to be, `Executor` is used to build
-/// final binary of your game. The editor is also able to use plugins, it manages them in special
-/// way that guarantees some invariants.
-///
-/// # Interface details
-///
-/// There is one confusing part in the plugin interface: two methods that looks like they're doing
-/// the same thing - [`Plugin::on_standalone_init`] and [`Plugin::on_enter_play_mode`]. However
-/// there is one major difference in the two. The first method is called when the plugin is running
-/// in a standalone mode (in game executor, which is final binary of your game). The second is used
-/// in the editor and called when the editor enters "play mode".
-///
-/// The "play mode" is special and should be described a bit more. The editor is able to edit
-/// scenes, there could be only one scene opened at a time. However your game could use multiple
-/// scenes (for example one for game menu and one per game level). This fact leads to a problem:
-/// how the game will know which scene is currently edited and requested for "play mode"?
-/// [`Plugin::on_enter_play_mode`] solves the problem by providing you the handle to the active
-/// scene, in this method you should force your game to use provided scene.
 ///
 /// # Static vs dynamic plugins
 ///
@@ -111,39 +137,18 @@ pub struct PluginContext<'a> {
 ///     event::Event
 /// };
 /// use std::str::FromStr;
+/// use fyrox::event_loop::ControlFlow;
 ///
+/// #[derive(Default)]
 /// struct MyPlugin {}
 ///
 /// impl Plugin for MyPlugin {
-///     fn on_register(&mut self, context: PluginRegistrationContext) {
-///         // The method is called when the plugin was just registered in the engine.
-///         // Register your scripts here using `context`.
+///     fn on_deinit(&mut self, context: PluginContext) {
+///         // The method is called when the plugin is disabling.
 ///         // The implementation is optional.
 ///     }
 ///
-///     fn on_standalone_init(&mut self, context: PluginContext) {
-///         // The method is called when the plugin is running in standalone mode (editor-less).
-///         // The implementation is optional.
-///     }
-///
-///     fn on_enter_play_mode(&mut self, scene: Handle<Scene>, context: PluginContext) {
-///         // The method is called when the plugin is running inside the editor and it enters
-///         // "play mode".
-///         // The implementation is optional.
-///     }
-///
-///     fn on_leave_play_mode(&mut self, context: PluginContext) {
-///         // The method is called when the plugin is running inside the editor and it leaves
-///         // "play mode".
-///         // The implementation is optional.
-///     }
-///
-///     fn on_unload(&mut self, context: &mut PluginContext) {
-///         // The method is called when the game/editor is about to shutdown.
-///         // The implementation is optional.
-///     }
-///
-///     fn update(&mut self, context: &mut PluginContext) {
+///     fn update(&mut self, context: &mut PluginContext, control_flow: &mut ControlFlow) {
 ///         // The method is called on every frame, it is guaranteed to have fixed update rate.
 ///         // The implementation is optional.
 ///     }
@@ -154,57 +159,33 @@ pub struct PluginContext<'a> {
 ///         uuid!("b9302812-81a7-48a5-89d2-921774d94943")
 ///     }
 ///
-///     fn on_os_event(&mut self, event: &Event<()>, context: PluginContext) {
+///     fn on_os_event(&mut self, event: &Event<()>, context: PluginContext, control_flow: &mut ControlFlow) {
 ///         // The method is called when the main window receives an event from the OS.
 ///     }
 /// }
 /// ```
-pub trait Plugin: 'static {
-    /// The method is called when the plugin was just registered in the engine. The main use of the
-    /// method is to register scripts and custom scene graph nodes in [`SerializationContext`].
-    fn on_register(&mut self, #[allow(unused_variables)] context: PluginRegistrationContext) {}
-
-    /// The method is called when the plugin is registered in game executor. It is guaranteed to be
-    /// called once.
-    ///
-    /// # Important notes
-    ///
-    /// The method is **not** called if the plugin is running in the editor! Use
-    /// [`Self::on_enter_play_mode`] instead.
-    fn on_standalone_init(&mut self, #[allow(unused_variables)] context: PluginContext) {}
-
-    /// The method is called if the plugin running in the editor and the editor enters play mode.
-    ///
-    /// # Important notes
-    ///
-    /// The method replaces [`Self::on_standalone_init`] when the plugin runs in the editor! Use
-    /// the method to obtain a handle to the scene being edited in the editor.
-    fn on_enter_play_mode(
-        &mut self,
-        #[allow(unused_variables)] scene: Handle<Scene>,
-        #[allow(unused_variables)] context: PluginContext,
-    ) {
-    }
-
-    /// The method is called when the plugin is running inside the editor and it leaves
-    /// "play mode".
-    fn on_leave_play_mode(&mut self, #[allow(unused_variables)] context: PluginContext) {}
-
-    /// The method is called when the game/editor is about to shutdown.
-    fn on_unload(&mut self, #[allow(unused_variables)] context: &mut PluginContext) {}
+pub trait Plugin: BasePlugin {
+    /// The method is called before plugin will be disabled. It should be used for clean up, or some
+    /// additional actions.
+    fn on_deinit(&mut self, #[allow(unused_variables)] context: PluginContext) {}
 
     /// Updates the plugin internals at fixed rate (see [`PluginContext::dt`] parameter for more
     /// info).
-    fn update(&mut self, #[allow(unused_variables)] context: &mut PluginContext) {}
+    fn update(
+        &mut self,
+        #[allow(unused_variables)] context: &mut PluginContext,
+        #[allow(unused_variables)] control_flow: &mut ControlFlow,
+    ) {
+    }
 
-    /// The method must return persistent type id. The id is used for serialization, the engine
-    /// saves the id into file (scene in most cases) and when you loading file it re-creates
-    /// correct plugin using the id.
+    /// The method must return persistent type id. It is used to link scripts and plugins, it is
+    /// possible to have multiple plugins and each script instance must be able to find correct
+    /// plugin, it is done by comparing UUIDs.
     ///
     /// # Important notes
     ///
-    /// Do **not** use [`Uuid::new_v4`] or any other [`Uuid`] methods that generates ids, ids
-    /// generated using these methods are **random** and are not suitable for serialization!
+    /// Do **not** use [`Uuid::new_v4`] or any other [`Uuid`] methods that generates ids, id must
+    /// be persistent until application running.
     ///
     /// # How to obtain UUID
     ///
@@ -218,6 +199,17 @@ pub trait Plugin: 'static {
         &mut self,
         #[allow(unused_variables)] event: &Event<()>,
         #[allow(unused_variables)] context: PluginContext,
+        #[allow(unused_variables)] control_flow: &mut ControlFlow,
+    ) {
+    }
+
+    /// The method will be called when there is any message from main user interface instance
+    /// of the engine.
+    fn on_ui_message(
+        &mut self,
+        #[allow(unused_variables)] context: &mut PluginContext,
+        #[allow(unused_variables)] message: &UiMessage,
+        #[allow(unused_variables)] control_flow: &mut ControlFlow,
     ) {
     }
 }

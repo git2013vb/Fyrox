@@ -1,4 +1,4 @@
-use crate::{block_on, FxHashMap, GamePlugin, Uuid};
+use crate::{block_on, GameConstructor};
 use fyrox::{
     animation::{
         machine::{Machine, Parameter, PoseNode, State, Transition},
@@ -6,21 +6,23 @@ use fyrox::{
     },
     core::{
         algebra::{UnitQuaternion, Vector3},
-        inspect::{Inspect, PropertyInfo},
+       reflect::Reflect, inspect::{Inspect, PropertyInfo},
         pool::Handle,
-        uuid::uuid,
+        uuid::{uuid, Uuid},
         visitor::prelude::*,
     },
     engine::resource_manager::ResourceManager,
+    impl_component_provider,
     resource::model::Model,
     scene::{
+        graph::map::NodeHandleMap,
         node::{Node, TypeUuidProvider},
         Scene,
     },
     script::{ScriptContext, ScriptTrait},
 };
 
-#[derive(Visit, Inspect, Default, Debug)]
+#[derive(Visit, Inspect, Reflect, Default, Debug)]
 pub struct Bot {
     collider: Handle<Node>,
     follow_target: bool,
@@ -29,6 +31,8 @@ pub struct Bot {
     #[inspect(skip)]
     machine: Option<BotAnimationMachine>,
 }
+
+impl_component_provider!(Bot);
 
 impl Clone for Bot {
     fn clone(&self) -> Self {
@@ -53,7 +57,6 @@ impl ScriptTrait for Bot {
         let ScriptContext {
             scene,
             resource_manager,
-            node,
             handle,
             ..
         } = context;
@@ -70,7 +73,7 @@ impl ScriptTrait for Bot {
             // Scale the model because it is too big.
             .set_scale(Vector3::new(0.01, 0.01, 0.01));
 
-        scene.graph.link_nodes_reserved(model, node, handle);
+        scene.graph.link_nodes(model, handle);
 
         self.machine = Some(block_on(BotAnimationMachine::new(
             scene,
@@ -80,16 +83,16 @@ impl ScriptTrait for Bot {
         self.follow_target = false;
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
-        if let Some(collider) = old_new_mapping.get(&self.collider) {
-            self.collider = *collider;
-        }
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
+        old_new_mapping.map(&mut self.collider);
     }
 
     fn on_update(&mut self, context: ScriptContext) {
         let ScriptContext {
-            scene, node, dt, ..
+            scene, handle, dt, ..
         } = context;
+
+        let node = &mut scene.graph[handle];
 
         let attack_distance = 0.6;
 
@@ -139,7 +142,7 @@ impl ScriptTrait for Bot {
     }
 
     fn plugin_uuid(&self) -> Uuid {
-        GamePlugin::type_uuid()
+        GameConstructor::type_uuid()
     }
 
     fn id(&self) -> Uuid {

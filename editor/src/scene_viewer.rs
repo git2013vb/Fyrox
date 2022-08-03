@@ -1,17 +1,24 @@
 use crate::{
     camera::PickingOptions, gui::make_dropdown_list_option_with_height, load_image,
-    utils::enable_widget, AddModelCommand, AssetItem, AssetKind, ChangeSelectionCommand,
-    CommandGroup, DropdownListBuilder, EditorScene, GameEngine, GraphSelection, InteractionMode,
-    InteractionModeKind, Message, Mode, SceneCommand, Selection, SetMeshTextureCommand,
-    SetParticleSystemTextureCommand, SetSpriteTextureCommand, Settings,
+    scene::commands::graph::ScaleNodeCommand, utils::enable_widget, AddModelCommand, AssetItem,
+    AssetKind, ChangeSelectionCommand, CommandGroup, DropdownListBuilder, EditorScene, GameEngine,
+    GraphSelection, InteractionMode, InteractionModeKind, Message, Mode, SceneCommand, Selection,
+    SetMeshTextureCommand, Settings,
 };
+use fyrox::gui::utils::make_simple_tooltip;
 use fyrox::{
-    core::{algebra::Vector2, color::Color, make_relative_path, math::Rect, pool::Handle},
+    core::{
+        algebra::{Vector2, Vector3},
+        color::Color,
+        make_relative_path,
+        math::Rect,
+        pool::Handle,
+    },
     engine::Engine,
     gui::{
         border::BorderBuilder,
         brush::Brush,
-        button::{ButtonBuilder, ButtonMessage},
+        button::{ButtonBuilder, ButtonContent, ButtonMessage},
         canvas::CanvasBuilder,
         dropdown_list::DropdownListMessage,
         formatted_text::WrapMode,
@@ -20,6 +27,7 @@ use fyrox::{
         message::{KeyCode, MessageDirection, MouseButton, UiMessage},
         stack_panel::StackPanelBuilder,
         text::TextBuilder,
+        vec::vec3::{Vec3EditorBuilder, Vec3EditorMessage},
         widget::{WidgetBuilder, WidgetMessage},
         window::{WindowBuilder, WindowMessage, WindowTitle},
         BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
@@ -48,6 +56,7 @@ pub struct SceneViewer {
     sender: Sender<Message>,
     interaction_mode_panel: Handle<UiNode>,
     contextual_actions: Handle<UiNode>,
+    global_position_display: Handle<UiNode>,
 }
 
 fn make_interaction_mode_button(
@@ -217,7 +226,7 @@ impl SceneViewer {
                             .with_margin(Thickness::uniform(1.0))
                             .with_width(100.0),
                     )
-                    .with_text("Play/Stop")
+                    .with_text("Play")
                     .build(ctx);
                     switch_mode
                 })
@@ -226,6 +235,29 @@ impl SceneViewer {
         .add_column(Column::stretch())
         .add_column(Column::auto())
         .add_row(Row::stretch())
+        .build(ctx);
+
+        let global_position_display;
+        let bottom_toolbar = StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_horizontal_alignment(HorizontalAlignment::Right)
+                .with_margin(Thickness::uniform(1.0))
+                .with_child({
+                    global_position_display = Vec3EditorBuilder::<f32>::new(
+                        WidgetBuilder::new()
+                            .with_tooltip(make_simple_tooltip(
+                                ctx,
+                                "Global Coordinates of the Current Selection",
+                            ))
+                            .with_width(200.0),
+                    )
+                    .with_editable(false)
+                    .build(ctx);
+                    global_position_display
+                })
+                .on_row(2),
+        )
+        .with_orientation(Orientation::Horizontal)
         .build(ctx);
 
         let window = WindowBuilder::new(WidgetBuilder::new())
@@ -277,10 +309,12 @@ impl SceneViewer {
                             .add_column(Column::auto())
                             .add_column(Column::stretch())
                             .build(ctx),
-                        ),
+                        )
+                        .with_child(bottom_toolbar),
                 )
                 .add_row(Row::strict(25.0))
                 .add_row(Row::stretch())
+                .add_row(Row::strict(25.0))
                 .add_column(Column::stretch())
                 .build(ctx),
             )
@@ -304,6 +338,7 @@ impl SceneViewer {
             switch_mode,
             interaction_mode_panel,
             contextual_actions,
+            global_position_display,
         }
     }
 }
@@ -369,7 +404,9 @@ impl SceneViewer {
                 self.sender.send(Message::OpenSettings).unwrap();
             }
         } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
-            if message.destination() == self.camera_projection {
+            if message.destination() == self.camera_projection
+                && message.direction == MessageDirection::FromWidget
+            {
                 if *index == 0 {
                     self.sender
                         .send(Message::SetEditorCameraProjection(Projection::Perspective(
@@ -434,8 +471,26 @@ impl SceneViewer {
         }
     }
 
+    pub fn sync_to_model(&self, editor_scene: &EditorScene, engine: &Engine) {
+        if let Selection::Graph(ref selection) = editor_scene.selection {
+            let scene = &engine.scenes[editor_scene.scene];
+            if let Some((_, position)) = selection.global_rotation_position(&scene.graph) {
+                engine.user_interface.send_message(Vec3EditorMessage::value(
+                    self.global_position_display,
+                    MessageDirection::ToWidget,
+                    position,
+                ));
+            }
+        }
+    }
+
     pub fn on_mode_changed(&self, ui: &UserInterface, mode: &Mode) {
         let enabled = mode.is_edit();
+        ui.send_message(ButtonMessage::content(
+            self.switch_mode,
+            MessageDirection::ToWidget,
+            ButtonContent::text(if enabled { "Play" } else { "Stop" }),
+        ));
         for widget in [self.interaction_mode_panel, self.contextual_actions] {
             enable_widget(widget, enabled, ui);
         }
@@ -454,6 +509,15 @@ impl SceneViewer {
             self.window,
             MessageDirection::ToWidget,
             WindowTitle::Text(title),
+        ));
+    }
+
+    pub fn reset_camera_projection(&self, ui: &UserInterface) {
+        // Default camera projection is Perspective.
+        ui.send_message(DropdownListMessage::selection(
+            self.camera_projection,
+            MessageDirection::ToWidget,
+            Some(0),
         ));
     }
 
@@ -648,6 +712,11 @@ impl SceneViewer {
                                 Selection::Graph(GraphSelection::single_or_empty(instance.root)),
                                 editor_scene.selection.clone(),
                             )),
+                            SceneCommand::new(ScaleNodeCommand::new(
+                                instance.root,
+                                Vector3::new(1.0, 1.0, 1.0),
+                                settings.model.instantiation_scale,
+                            )),
                         ];
 
                         self.sender
@@ -680,22 +749,6 @@ impl SceneViewer {
                                         result.node,
                                         tex,
                                     )))
-                                    .unwrap();
-                            } else if node.is_sprite() {
-                                self.sender
-                                    .send(Message::do_scene_command(SetSpriteTextureCommand::new(
-                                        result.node,
-                                        Some(tex),
-                                    )))
-                                    .unwrap();
-                            } else if node.is_particle_system() {
-                                self.sender
-                                    .send(Message::do_scene_command(
-                                        SetParticleSystemTextureCommand::new(
-                                            result.node,
-                                            Some(tex),
-                                        ),
-                                    ))
                                     .unwrap();
                             }
                         }

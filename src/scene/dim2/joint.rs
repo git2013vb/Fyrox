@@ -2,118 +2,89 @@
 
 use crate::{
     core::{
-        algebra::{UnitComplex, Vector2},
+        algebra::Matrix4,
         inspect::{Inspect, PropertyInfo},
-        math::aabb::AxisAlignedBoundingBox,
+        math::{aabb::AxisAlignedBoundingBox, m4x4_approx_eq},
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::prelude::*,
     },
     engine::resource_manager::ResourceManager,
     impl_directly_inheritable_entity_trait,
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         node::{Node, NodeTrait, SyncContext, TypeUuidProvider},
-        variable::{InheritError, TemplateVariable},
         DirectlyInheritableEntity,
     },
     utils::log::Log,
 };
-use fxhash::FxHashMap;
 use rapier2d::dynamics::ImpulseJointHandle;
 use std::{
     cell::Cell,
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Range},
 };
 
 /// Ball joint locks any translational moves between two objects on the axis between objects, but
 /// allows rigid bodies to perform relative rotations. The real world example is a human shoulder,
 /// pendulum, etc.
-#[derive(Clone, Debug, Visit, PartialEq, Inspect)]
+#[derive(Clone, Debug, Visit, PartialEq, Inspect, Reflect)]
 pub struct BallJoint {
-    /// Where the prismatic joint is attached on the first body, expressed in the local space of the
-    /// first attached body.
-    pub local_anchor1: Vector2<f32>,
-    /// Where the prismatic joint is attached on the second body, expressed in the local space of the
-    /// second attached body.
-    pub local_anchor2: Vector2<f32>,
-    /// The maximum angle allowed between the two limit axes in world-space.
-    pub limits_angles: [f32; 2],
+    /// Whether angular limits are enabled or not. Default is `false`
+    #[inspect(description = "Whether angular limits are enabled or not.")]
+    #[visit(optional)] // Backward compatibility
+    pub limits_enabled: bool,
+
+    /// Allowed angles range for the joint (in radians).
+    #[inspect(description = "Allowed angles range for the joint (in radians).")]
+    #[visit(optional)] // Backward compatibility
+    pub limits_angles: Range<f32>,
 }
 
 impl Default for BallJoint {
     fn default() -> Self {
         Self {
-            local_anchor1: Default::default(),
-            local_anchor2: Default::default(),
-            limits_angles: [f32::MIN, f32::MAX],
+            limits_enabled: false,
+            limits_angles: -std::f32::consts::PI..std::f32::consts::PI,
         }
     }
 }
 
 /// A fixed joint ensures that two rigid bodies does not move relative to each other. There is no
 /// straightforward real-world example, but it can be thought as two bodies were "welded" together.
-#[derive(Clone, Debug, Visit, PartialEq, Inspect)]
-pub struct FixedJoint {
-    /// Local translation for the first body.
-    pub local_anchor1_translation: Vector2<f32>,
-    /// Local rotation for the first body.
-    pub local_anchor1_rotation: UnitComplex<f32>,
-    /// Local translation for the second body.
-    pub local_anchor2_translation: Vector2<f32>,
-    /// Local rotation for the second body.
-    pub local_anchor2_rotation: UnitComplex<f32>,
-}
-
-impl Default for FixedJoint {
-    fn default() -> Self {
-        Self {
-            local_anchor1_translation: Default::default(),
-            local_anchor1_rotation: UnitComplex::new(0.0),
-            local_anchor2_translation: Default::default(),
-            local_anchor2_rotation: UnitComplex::new(0.0),
-        }
-    }
-}
+#[derive(Clone, Debug, Default, Visit, PartialEq, Inspect, Reflect)]
+pub struct FixedJoint;
 
 /// Prismatic joint prevents any relative movement between two rigid-bodies, except for relative
 /// translations along one axis. The real world example is a sliders that used to support drawers.
-#[derive(Clone, Debug, Visit, PartialEq, Inspect)]
+#[derive(Clone, Debug, Visit, PartialEq, Inspect, Reflect)]
 pub struct PrismaticJoint {
-    /// Where the prismatic joint is attached on the first body, expressed in the local space of the
-    /// first attached body.
-    pub local_anchor1: Vector2<f32>,
-    /// The rotation axis of this revolute joint expressed in the local space of the first attached
-    /// body.
-    pub local_axis1: Vector2<f32>,
-    /// Where the prismatic joint is attached on the second body, expressed in the local space of the
-    /// second attached body.
-    pub local_anchor2: Vector2<f32>,
-    /// The rotation axis of this revolute joint expressed in the local space of the second attached
-    /// body.
-    pub local_axis2: Vector2<f32>,
-    /// Whether or not this joint should enforce translational limits along its axis.
+    /// Whether linear limits along local X axis of the joint are enabled or not. Default is `false`
+    #[inspect(
+        description = "Whether linear limits along local X axis of the joint are enabled or not."
+    )]
+    #[visit(optional)] // Backward compatibility
     pub limits_enabled: bool,
-    /// The min an max relative position of the attached bodies along this joint's axis.
-    pub limits: [f32; 2],
+
+    /// Allowed linear distance range along local X axis of the joint.
+    #[inspect(description = "Allowed linear distance range along local X axis of the joint.")]
+    #[visit(optional)] // Backward compatibility
+    pub limits: Range<f32>,
 }
 
 impl Default for PrismaticJoint {
     fn default() -> Self {
         Self {
-            local_anchor1: Default::default(),
-            local_axis1: Vector2::y(),
-            local_anchor2: Default::default(),
-            local_axis2: Vector2::x(),
             limits_enabled: false,
-            limits: [f32::MIN, f32::MAX],
+            limits: -std::f32::consts::PI..std::f32::consts::PI,
         }
     }
 }
 
 /// The exact kind of the joint.
-#[derive(Clone, Debug, PartialEq, Visit)]
+#[derive(Clone, Debug, PartialEq, Visit, Reflect)]
 pub enum JointParams {
     /// See [`BallJoint`] for more info.
     BallJoint(BallJoint),
@@ -141,28 +112,43 @@ impl Default for JointParams {
 
 /// Joint is used to restrict motion of two rigid bodies. There are numerous examples of joints in
 /// real life: door hinge, ball joints in human arms, etc.
-#[derive(Visit, Inspect, Debug)]
+#[derive(Visit, Inspect, Reflect, Debug)]
 pub struct Joint {
     base: Base,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_params")]
     pub(crate) params: TemplateVariable<JointParams>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_body1")]
     pub(crate) body1: TemplateVariable<Handle<Node>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_body2")]
     pub(crate) body2: TemplateVariable<Handle<Node>>,
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[visit(optional)] // Backward compatibility
+    #[reflect(deref, setter = "set_contacts_enabled")]
+    pub(crate) contacts_enabled: TemplateVariable<bool>,
 
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub(crate) native: Cell<ImpulseJointHandle>,
+
+    #[visit(skip)]
+    #[inspect(skip)]
+    #[reflect(hidden)]
+    pub(crate) need_rebind: Cell<bool>,
 }
 
 impl_directly_inheritable_entity_trait!(Joint;
     params,
     body1,
-    body2
+    body2,
+    contacts_enabled
 );
 
 impl Default for Joint {
@@ -172,7 +158,9 @@ impl Default for Joint {
             params: Default::default(),
             body1: Default::default(),
             body2: Default::default(),
+            contacts_enabled: TemplateVariable::new(true),
             native: Cell::new(ImpulseJointHandle::invalid()),
+            need_rebind: Cell::new(true),
         }
     }
 }
@@ -198,7 +186,9 @@ impl Clone for Joint {
             params: self.params.clone(),
             body1: self.body1.clone(),
             body2: self.body2.clone(),
+            contacts_enabled: self.contacts_enabled.clone(),
             native: Cell::new(ImpulseJointHandle::invalid()),
+            need_rebind: Cell::new(true),
         }
     }
 }
@@ -210,6 +200,11 @@ impl TypeUuidProvider for Joint {
 }
 
 impl Joint {
+    /// Sets new parameters of the joint.
+    pub fn set_params(&mut self, params: JointParams) -> JointParams {
+        self.params.set(params)
+    }
+
     /// Returns a shared reference to the current joint parameters.
     pub fn params(&self) -> &JointParams {
         &self.params
@@ -223,8 +218,8 @@ impl Joint {
 
     /// Sets the first body of the joint. The handle should point to the RigidBody node, otherwise
     /// the joint will have no effect!
-    pub fn set_body1(&mut self, handle: Handle<Node>) {
-        self.body1.set(handle);
+    pub fn set_body1(&mut self, handle: Handle<Node>) -> Handle<Node> {
+        self.body1.set(handle)
     }
 
     /// Returns current first body of the joint.
@@ -234,13 +229,23 @@ impl Joint {
 
     /// Sets the second body of the joint. The handle should point to the RigidBody node, otherwise
     /// the joint will have no effect!
-    pub fn set_body2(&mut self, handle: Handle<Node>) {
-        self.body2.set(handle);
+    pub fn set_body2(&mut self, handle: Handle<Node>) -> Handle<Node> {
+        self.body2.set(handle)
     }
 
     /// Returns current second body of the joint.
     pub fn body2(&self) -> Handle<Node> {
         *self.body2
+    }
+
+    /// Sets whether the connected bodies should ignore collisions with each other or not.  
+    pub fn set_contacts_enabled(&mut self, enabled: bool) -> bool {
+        self.contacts_enabled.set(enabled)
+    }
+
+    /// Returns true if contacts between connected bodies is enabled, false - otherwise.
+    pub fn is_contacts_enabled(&self) -> bool {
+        *self.contacts_enabled
     }
 }
 
@@ -269,14 +274,14 @@ impl NodeTrait for Joint {
         self.reset_self_inheritable_properties();
     }
 
-    fn restore_resources(&mut self, _resource_manager: ResourceManager) {}
+    fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager);
+    }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
 
-        if let Some(entry) = old_new_mapping.get(&self.body1()) {
-            self.body1.set_silent(*entry);
-        } else {
+        if !old_new_mapping.try_map_silent(&mut self.body1) {
             Log::warn(format!(
                 "Unable to remap first body of a joint {}. Handle is {}!",
                 self.name(),
@@ -284,9 +289,7 @@ impl NodeTrait for Joint {
             ))
         }
 
-        if let Some(entry) = old_new_mapping.get(&self.body2()) {
-            self.body2.set_silent(*entry);
-        } else {
+        if !old_new_mapping.try_map_silent(&mut self.body2) {
             Log::warn(format!(
                 "Unable to remap second body of a joint {}. Handle is {}!",
                 self.name(),
@@ -313,6 +316,12 @@ impl NodeTrait for Joint {
             .physics2d
             .sync_to_joint_node(context.nodes, self_handle, self);
     }
+
+    fn sync_transform(&self, new_global_transform: &Matrix4<f32>, _context: &mut SyncContext) {
+        if !m4x4_approx_eq(new_global_transform, &self.global_transform()) {
+            self.need_rebind.set(true);
+        }
+    }
 }
 
 /// Joint builder allows you to build Joint node in a declarative manner.
@@ -321,6 +330,7 @@ pub struct JointBuilder {
     params: JointParams,
     body1: Handle<Node>,
     body2: Handle<Node>,
+    contacts_enabled: bool,
 }
 
 impl JointBuilder {
@@ -331,6 +341,7 @@ impl JointBuilder {
             params: Default::default(),
             body1: Default::default(),
             body2: Default::default(),
+            contacts_enabled: true,
         }
     }
 
@@ -354,6 +365,12 @@ impl JointBuilder {
         self
     }
 
+    /// Sets whether the connected bodies should ignore collisions with each other or not.  
+    pub fn with_contacts_enabled(mut self, enabled: bool) -> Self {
+        self.contacts_enabled = enabled;
+        self
+    }
+
     /// Creates new Joint node, but does not add it to the graph.
     pub fn build_joint(self) -> Joint {
         Joint {
@@ -361,7 +378,9 @@ impl JointBuilder {
             params: self.params.into(),
             body1: self.body1.into(),
             body2: self.body2.into(),
+            contacts_enabled: self.contacts_enabled.into(),
             native: Cell::new(ImpulseJointHandle::invalid()),
+            need_rebind: Cell::new(true),
         }
     }
 
@@ -378,23 +397,16 @@ impl JointBuilder {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        core::algebra::Vector2,
-        scene::{
-            base::{test::check_inheritable_properties_equality, BaseBuilder},
-            dim2::joint::{BallJoint, Joint, JointBuilder, JointParams},
-            node::NodeTrait,
-        },
+    use crate::scene::{
+        base::{test::check_inheritable_properties_equality, BaseBuilder},
+        dim2::joint::{BallJoint, Joint, JointBuilder, JointParams},
+        node::NodeTrait,
     };
 
     #[test]
     fn test_joint_2d_inheritance() {
         let parent = JointBuilder::new(BaseBuilder::new())
-            .with_params(JointParams::BallJoint(BallJoint {
-                local_anchor1: Vector2::new(1.0, 0.0),
-                local_anchor2: Vector2::new(1.0, 1.0),
-                limits_angles: [-1.57, 1.57],
-            }))
+            .with_params(JointParams::BallJoint(BallJoint::default()))
             .build_node();
 
         let mut child = JointBuilder::new(BaseBuilder::new()).build_joint();

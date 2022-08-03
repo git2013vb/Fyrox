@@ -3,6 +3,7 @@ use crate::{
     core::{
         inspect::{Inspect, PropertyInfo},
         pool::Handle,
+        reflect::Reflect,
         visitor::prelude::*,
     },
 };
@@ -28,7 +29,7 @@ pub struct Transition {
     pub(crate) blend_factor: f32,
 }
 
-#[derive(Default, Debug, Visit, Clone, Inspect)]
+#[derive(Default, Debug, Visit, Clone, Inspect, Reflect)]
 pub struct TransitionDefinition {
     #[inspect(description = "The name of the transition, it is used for debug output.")]
     pub name: String,
@@ -49,7 +50,6 @@ pub struct TransitionDefinition {
     /// If set, then fetched value from `rule` will be inverted. It is useful for cases when you
     /// have a pair of transitions that depend on a single Rule parameter, but have different
     /// directions (A -> B, B -> A).
-    #[visit(optional)]
     #[inspect(
         description = "If set, then fetched value from `rule` will be inverted. It is useful
      for cases when you have a pair of transitions that depend on a single Rule parameter,

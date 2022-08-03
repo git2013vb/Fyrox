@@ -11,7 +11,6 @@ use crate::{
     },
     decorator::DecoratorBuilder,
     define_constructor,
-    formatted_text::WrapMode,
     grid::{Column, GridBuilder, Row},
     message::{KeyCode, MessageDirection, UiMessage},
     text_box::{TextBox, TextBoxBuilder, TextBoxMessage},
@@ -20,6 +19,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, NodeHandleMapping, Thickness, UiNode,
     UserInterface, VerticalAlignment, BRUSH_DARK, BRUSH_LIGHT,
 };
+use fyrox_core::reflect::Reflect;
 use std::{
     any::{Any, TypeId},
     fmt::{Debug, Display},
@@ -41,6 +41,7 @@ pub trait NumericType:
     + Sync
     + NumCast
     + Default
+    + Reflect
     + 'static
 {
 }
@@ -59,6 +60,7 @@ impl<T> NumericType for T where
         + Sync
         + NumCast
         + Default
+        + Reflect
         + 'static
 {
 }
@@ -233,11 +235,18 @@ pub struct NumericUpDownBuilder<T: NumericType> {
     min_value: T,
     max_value: T,
     precision: usize,
+    editable: bool,
 }
 
-pub fn make_button(ctx: &mut BuildContext, arrow: ArrowDirection, row: usize) -> Handle<UiNode> {
+pub fn make_button(
+    ctx: &mut BuildContext,
+    arrow: ArrowDirection,
+    row: usize,
+    editable: bool,
+) -> Handle<UiNode> {
     ButtonBuilder::new(
         WidgetBuilder::new()
+            .with_enabled(editable)
             .with_margin(Thickness::right(1.0))
             .on_row(row),
     )
@@ -263,6 +272,7 @@ impl<T: NumericType> NumericUpDownBuilder<T> {
             min_value: T::min_value(),
             max_value: T::max_value(),
             precision: 3,
+            editable: true,
         }
     }
 
@@ -300,6 +310,11 @@ impl<T: NumericType> NumericUpDownBuilder<T> {
         self
     }
 
+    pub fn with_editable(mut self, editable: bool) -> Self {
+        self.editable = editable;
+        self
+    }
+
     pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
         let increase;
         let decrease;
@@ -318,8 +333,8 @@ impl<T: NumericType> NumericUpDownBuilder<T> {
                     field = TextBoxBuilder::new(WidgetBuilder::new().on_row(0).on_column(0))
                         .with_vertical_text_alignment(VerticalAlignment::Center)
                         .with_horizontal_text_alignment(HorizontalAlignment::Left)
-                        .with_wrap(WrapMode::Letter)
                         .with_text(format!("{:.1$}", self.value, self.precision))
+                        .with_editable(self.editable)
                         .build(ctx);
                     field
                 })
@@ -328,11 +343,12 @@ impl<T: NumericType> NumericUpDownBuilder<T> {
                         WidgetBuilder::new()
                             .on_column(1)
                             .with_child({
-                                increase = make_button(ctx, ArrowDirection::Top, 0);
+                                increase = make_button(ctx, ArrowDirection::Top, 0, self.editable);
                                 increase
                             })
                             .with_child({
-                                decrease = make_button(ctx, ArrowDirection::Bottom, 1);
+                                decrease =
+                                    make_button(ctx, ArrowDirection::Bottom, 1, self.editable);
                                 decrease
                             }),
                     )

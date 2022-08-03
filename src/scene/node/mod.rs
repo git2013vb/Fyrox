@@ -4,12 +4,15 @@
 
 #![warn(missing_docs)]
 
+use crate::scene::graph::map::NodeHandleMap;
 use crate::{
+    core::variable::InheritError,
     core::{
         algebra::{Matrix4, Vector2},
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
+        reflect::Reflect,
         uuid::Uuid,
         visitor::{Visit, VisitResult, Visitor},
     },
@@ -27,10 +30,8 @@ use crate::{
         sound::{context::SoundContext, listener::Listener, Sound},
         sprite::Sprite,
         terrain::Terrain,
-        variable::InheritError,
     },
 };
-use fxhash::FxHashMap;
 use std::{
     any::{Any, TypeId},
     fmt::Debug,
@@ -52,12 +53,6 @@ pub trait BaseNodeTrait: Any + Debug + Deref<Target = Base> + DerefMut + Send {
     /// because internally nodes may (and most likely will) contain handles to other nodes. To
     /// correctly clone a node you have to use [copy_node](struct.Graph.html#method.copy_node).
     fn clone_box(&self) -> Node;
-
-    /// Returns self as shared reference to [`Any`].
-    fn as_any(&self) -> &dyn Any;
-
-    /// Returns self as mutable reference to [`Any`].
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 impl<T> BaseNodeTrait for T
@@ -66,14 +61,6 @@ where
 {
     fn clone_box(&self) -> Node {
         Node(Box::new(self.clone()))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }
 
@@ -144,7 +131,7 @@ macro_rules! impl_query_component {
 }
 
 /// A main trait for any scene graph node.
-pub trait NodeTrait: BaseNodeTrait + Inspect + Visit {
+pub trait NodeTrait: BaseNodeTrait + Reflect + Inspect + Visit {
     /// Allows a node to provide access to inner components.
     fn query_component_ref(&self, type_id: TypeId) -> Option<&dyn Any>;
 
@@ -179,7 +166,7 @@ pub trait NodeTrait: BaseNodeTrait + Inspect + Visit {
     /// Re-maps internal handles after cloning or property inheritance. It is needed because a node
     /// might store handles to other nodes in scene graph, for example a skinned mesh stores handles
     /// to bones and when we copy the mesh, handles must be mapped to respective copies of each bone.
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>);
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap);
 
     /// Returns actual type id. It will be used for serialization, the type will be saved together
     /// with node's data allowing you to create correct node instance on deserialization.

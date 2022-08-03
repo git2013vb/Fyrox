@@ -12,21 +12,21 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::{Visit, VisitResult, Visitor},
     },
     engine::resource_manager::ResourceManager,
     impl_directly_inheritable_entity_trait,
     scene::{
         base::Base,
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         light::{BaseLight, BaseLightBuilder},
         node::{Node, NodeTrait, TypeUuidProvider},
-        variable::{InheritError, TemplateVariable},
         DirectlyInheritableEntity,
     },
 };
-use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
 use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 
@@ -34,7 +34,9 @@ use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 pub const CSM_NUM_CASCADES: usize = 3;
 
 /// Frustum split options defines how to split camera's frustum to generate cascades.
-#[derive(Inspect, Clone, Visit, Debug, PartialEq, AsRefStr, EnumString, EnumVariantNames)]
+#[derive(
+    Inspect, Reflect, Clone, Visit, Debug, PartialEq, AsRefStr, EnumString, EnumVariantNames,
+)]
 pub enum FrustumSplitOptions {
     /// Camera frustum will be split into a [`CSM_NUM_CASCADES`] splits where each sub-frustum
     /// will have fixed far plane location.
@@ -69,7 +71,7 @@ impl Default for FrustumSplitOptions {
 }
 
 /// Cascade Shadow Mapping (CSM) options.
-#[derive(Inspect, Clone, Visit, PartialEq, Debug)]
+#[derive(Inspect, Reflect, Clone, Visit, PartialEq, Debug)]
 pub struct CsmOptions {
     /// See [`FrustumSplitOptions`].
     pub split_options: FrustumSplitOptions,
@@ -102,12 +104,12 @@ impl CsmOptions {
 }
 
 /// See module docs.
-#[derive(Default, Debug, Visit, Inspect, Clone)]
+#[derive(Default, Debug, Visit, Inspect, Reflect, Clone)]
 pub struct DirectionalLight {
     base_light: BaseLight,
     /// See [`CsmOptions`].
-    #[inspect(getter = "Deref::deref")]
-    #[visit(optional)] // Backward compatibility
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref)]
     pub csm_options: TemplateVariable<CsmOptions>,
 }
 
@@ -183,9 +185,11 @@ impl NodeTrait for DirectionalLight {
         self.reset_self_inheritable_properties();
     }
 
-    fn restore_resources(&mut self, _resource_manager: ResourceManager) {}
+    fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base_light.restore_resources(resource_manager);
+    }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base_light.remap_handles(old_new_mapping);
     }
 

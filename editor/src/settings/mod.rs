@@ -1,7 +1,7 @@
 use crate::{
     inspector::editors::make_property_editors_container,
     settings::{
-        debugging::DebuggingSettings, graphics::GraphicsSettings,
+        debugging::DebuggingSettings, graphics::GraphicsSettings, model::ModelSettings,
         move_mode::MoveInteractionModeSettings, rotate_mode::RotateInteractionModeSettings,
         selection::SelectionSettings,
     },
@@ -11,6 +11,7 @@ use fyrox::{
     core::{
         inspect::{Inspect, PropertyInfo},
         pool::Handle,
+        reflect::Reflect,
         scope_profile,
     },
     gui::{
@@ -40,6 +41,7 @@ use std::{fs::File, path::PathBuf, rc::Rc, sync::mpsc::Sender};
 
 pub mod debugging;
 pub mod graphics;
+pub mod model;
 pub mod move_mode;
 pub mod rotate_mode;
 pub mod selection;
@@ -51,13 +53,14 @@ pub struct SettingsWindow {
     inspector: Handle<UiNode>,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Clone, Default, Debug, Inspect)]
+#[derive(Deserialize, Serialize, PartialEq, Clone, Default, Debug, Inspect, Reflect)]
 pub struct Settings {
     pub selection: SelectionSettings,
     pub graphics: GraphicsSettings,
     pub debugging: DebuggingSettings,
     pub move_mode_settings: MoveInteractionModeSettings,
     pub rotate_mode_settings: RotateInteractionModeSettings,
+    pub model: ModelSettings,
 }
 
 #[derive(Debug)]
@@ -99,7 +102,7 @@ impl Settings {
     fn make_property_editors_container(
         sender: Sender<Message>,
     ) -> Rc<PropertyEditorDefinitionContainer> {
-        let mut container = make_property_editors_container(sender);
+        let container = make_property_editors_container(sender);
 
         container.insert(InspectablePropertyEditorDefinition::<GraphicsSettings>::new());
         container.insert(InspectablePropertyEditorDefinition::<SelectionSettings>::new());
@@ -113,6 +116,7 @@ impl Settings {
         container.insert(InspectablePropertyEditorDefinition::<
             RotateInteractionModeSettings,
         >::new());
+        container.insert(InspectablePropertyEditorDefinition::<ModelSettings>::new());
 
         Rc::new(container)
     }
@@ -129,6 +133,7 @@ impl Settings {
                 Self::ROTATE_MODE_SETTINGS => {
                     self.rotate_mode_settings.handle_property_changed(&**inner)
                 }
+                Self::MODEL => self.model.handle_property_changed(&**inner),
                 _ => false,
             };
         }
@@ -275,14 +280,14 @@ impl SettingsWindow {
                         e
                     ));
                 } else {
-                    Log::info("New graphics quality settings were successfully set!".to_owned());
+                    Log::info("New graphics quality settings were successfully set!");
                 }
             }
 
             // Save config
             match settings.save() {
                 Ok(_) => {
-                    Log::info("Settings were successfully saved!".to_owned());
+                    Log::info("Settings were successfully saved!");
                 }
                 Err(e) => {
                     Log::err(format!("Unable to save settings! Reason: {:?}!", e));

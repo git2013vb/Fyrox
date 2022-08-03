@@ -12,17 +12,19 @@ use crate::{
 };
 use fyrox::{
     core::{
-        algebra::Point3,
+        algebra::{Matrix4, Point3, UnitQuaternion, Vector3},
         color::Color,
-        math::{aabb::AxisAlignedBoundingBox, TriangleDefinition},
+        math::{aabb::AxisAlignedBoundingBox, frustum::Frustum, Matrix4Ext, TriangleDefinition},
         pool::{Handle, Pool},
         visitor::Visitor,
     },
     engine::Engine,
     scene::{
         base::BaseBuilder,
+        camera::Camera,
         debug::{Line, SceneDrawingContext},
         graph::Graph,
+        light::{point::PointLight, spot::SpotLight},
         mesh::{
             buffer::{VertexAttributeUsage, VertexReadTrait},
             Mesh,
@@ -50,6 +52,7 @@ pub struct EditorScene {
     pub clipboard: Clipboard,
     pub camera_controller: CameraController,
     pub navmeshes: Pool<Navmesh>,
+    pub preview_camera: Handle<Node>,
 }
 
 pub fn is_scene_needs_to_be_saved(editor_scene: Option<&EditorScene>) -> bool {
@@ -63,9 +66,9 @@ impl EditorScene {
         let root = PivotBuilder::new(BaseBuilder::new()).build(&mut scene.graph);
         let camera_controller = CameraController::new(&mut scene.graph, root);
 
-        // Prevent physics simulation in while editing scene.
-        scene.graph.physics.enabled = false;
-        scene.graph.physics2d.enabled = false;
+        // Freeze physics simulation in while editing scene by setting time step to zero.
+        scene.graph.physics.integration_parameters.dt = 0.0;
+        scene.graph.physics2d.integration_parameters.dt = 0.0;
 
         let mut navmeshes = Pool::new();
 
@@ -99,6 +102,7 @@ impl EditorScene {
             selection: Default::default(),
             clipboard: Default::default(),
             has_unsaved_changes: false,
+            preview_camera: Default::default(),
         }
     }
 
@@ -275,6 +279,29 @@ impl EditorScene {
                         }
                     }
                 }
+            } else if let Some(camera) = node.query_component_ref::<Camera>() {
+                ctx.draw_frustum(
+                    &Frustum::from(camera.view_projection_matrix()).unwrap_or_default(),
+                    Color::ORANGE,
+                );
+            } else if let Some(light) = node.query_component_ref::<PointLight>() {
+                ctx.draw_wire_sphere(light.global_position(), light.radius(), 30, Color::GREEN);
+            } else if let Some(light) = node.query_component_ref::<SpotLight>() {
+                ctx.draw_cone(
+                    16,
+                    (light.full_cone_angle() * 0.5).tan() * light.distance(),
+                    light.distance(),
+                    Matrix4::new_translation(&light.global_position())
+                        * UnitQuaternion::from_matrix(&light.global_transform().basis())
+                            .to_homogeneous()
+                        * Matrix4::new_translation(&Vector3::new(
+                            0.0,
+                            -light.distance() * 0.5,
+                            0.0,
+                        )),
+                    Color::GREEN,
+                    false,
+                );
             }
 
             for &child in node.children() {
@@ -332,50 +359,4 @@ impl Selection {
     pub fn is_single_selection(&self) -> bool {
         self.len() == 1
     }
-}
-
-#[macro_export]
-macro_rules! define_vec_add_remove_commands {
-    (struct $add_name:ident, $remove_name:ident<$model_ty:ty, $value_ty:ty> ($self:ident, $context:ident)$get_container:block) => {
-        #[derive(Debug)]
-        pub struct $add_name {
-            pub handle: Handle<$model_ty>,
-            pub value: $value_ty,
-        }
-
-        impl Command for $add_name {
-            fn name(&mut self, _: &SceneContext) -> String {
-                stringify!($add_name).to_owned()
-            }
-
-            fn execute(&mut $self, $context: &mut SceneContext) {
-                $get_container.push(std::mem::take(&mut $self.value));
-            }
-
-            fn revert(&mut $self, $context: &mut SceneContext) {
-                $self.value = $get_container.pop().unwrap();
-            }
-        }
-
-        #[derive(Debug)]
-        pub struct $remove_name {
-            pub handle: Handle<$model_ty>,
-            pub index: usize,
-            pub value: Option<$value_ty>,
-        }
-
-        impl Command for $remove_name {
-            fn name(&mut self, _: &SceneContext) -> String {
-                stringify!($remove_name).to_owned()
-            }
-
-            fn execute(&mut $self, $context: &mut SceneContext) {
-                $self.value = Some($get_container.remove($self.index));
-            }
-
-            fn revert(&mut $self, $context: &mut SceneContext) {
-                $get_container.insert($self.index, $self.value.take().unwrap());
-            }
-        }
-    };
 }

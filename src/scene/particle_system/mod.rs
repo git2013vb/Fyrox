@@ -78,7 +78,9 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, TriangleDefinition},
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::prelude::*,
     },
     engine::resource_manager::ResourceManager,
@@ -86,18 +88,16 @@ use crate::{
     resource::texture::Texture,
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         node::{Node, NodeTrait, TypeUuidProvider, UpdateContext},
         particle_system::{
             draw::{DrawData, Vertex},
             emitter::{Emit, Emitter},
             particle::Particle,
         },
-        variable::{InheritError, TemplateVariable},
         DirectlyInheritableEntity,
     },
 };
-use fxhash::FxHashMap;
 use std::{
     cmp::Ordering,
     fmt::Debug,
@@ -108,70 +108,67 @@ pub(crate) mod draw;
 pub mod emitter;
 pub mod particle;
 
-/// Particle limit for emitter.
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum ParticleLimit {
-    /// No limit in amount of particles.
-    Unlimited,
-    /// Strict limit in amount of particles.
-    Strict(u32),
+#[doc(hidden)]
+#[derive(PartialEq, Debug, Clone, Default, Inspect, Reflect)]
+pub struct EmitterWrapper(#[inspect(display_name = "Emitter Type")] pub Emitter);
+
+impl Deref for EmitterWrapper {
+    type Target = Emitter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-impl Visit for ParticleLimit {
+impl DerefMut for EmitterWrapper {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Visit for EmitterWrapper {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        let mut region = visitor.enter_region(name)?;
-
-        let mut amount = match self {
-            Self::Unlimited => -1,
-            Self::Strict(value) => *value as i32,
-        };
-
-        amount.visit("Amount", &mut region)?;
-
-        drop(region);
-
-        if visitor.is_reading() {
-            *self = if amount < 0 {
-                Self::Unlimited
-            } else {
-                Self::Strict(amount as u32)
-            };
-        }
-
-        Ok(())
+        self.0.visit(name, visitor)
     }
 }
 
 /// See module docs.
-#[derive(Debug, Visit, Clone, Inspect)]
+#[derive(Debug, Visit, Clone, Inspect, Reflect)]
 pub struct ParticleSystem {
     base: Base,
 
     /// List of emitters of the particle system.
-    #[inspect(getter = "Deref::deref")]
-    pub emitters: TemplateVariable<Vec<Emitter>>,
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref)]
+    pub emitters: TemplateVariable<Vec<EmitterWrapper>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_texture")]
     texture: TemplateVariable<Option<Texture>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_acceleration")]
     acceleration: TemplateVariable<Vector3<f32>>,
 
     #[visit(rename = "ColorGradient")]
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_color_over_lifetime_gradient")]
     color_over_lifetime: TemplateVariable<Option<ColorGradient>>,
 
-    #[visit(optional)] // Backward compatibility.
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_soft_boundary_sharpness_factor")]
     soft_boundary_sharpness_factor: TemplateVariable<f32>,
 
-    #[visit(optional)] // Backward compatibility.
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_enabled")]
     enabled: TemplateVariable<bool>,
 
     #[inspect(skip)]
+    #[reflect(hidden)]
     particles: Vec<Particle>,
+
     #[inspect(skip)]
+    #[reflect(hidden)]
     free_particles: Vec<u32>,
 }
 
@@ -212,13 +209,16 @@ impl ParticleSystem {
 
     /// Set new acceleration that will be applied to all particles,
     /// can be used to change "gravity" vector of particles.
-    pub fn set_acceleration(&mut self, accel: Vector3<f32>) {
-        self.acceleration.set(accel);
+    pub fn set_acceleration(&mut self, accel: Vector3<f32>) -> Vector3<f32> {
+        self.acceleration.set(accel)
     }
 
     /// Sets new "color curve" that will evaluate color over lifetime.
-    pub fn set_color_over_lifetime_gradient(&mut self, gradient: ColorGradient) {
-        self.color_over_lifetime.set(Some(gradient));
+    pub fn set_color_over_lifetime_gradient(
+        &mut self,
+        gradient: Option<ColorGradient>,
+    ) -> Option<ColorGradient> {
+        self.color_over_lifetime.set(gradient)
     }
 
     /// Return current soft boundary sharpness factor.
@@ -228,8 +228,8 @@ impl ParticleSystem {
 
     /// Enables or disables particle system. Disabled particle system remains in "frozen" state
     /// until enabled again.
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled.set(enabled);
+    pub fn set_enabled(&mut self, enabled: bool) -> bool {
+        self.enabled.set(enabled)
     }
 
     /// Returns current particle system status.
@@ -241,8 +241,8 @@ impl ParticleSystem {
     /// The greater the factor is the more thin the boundary will be, and vice versa. This
     /// parameter allows you to manipulate particle "softness" - the engine automatically adds
     /// fading to those pixels of a particle which is close enough to other geometry in a scene.
-    pub fn set_soft_boundary_sharpness_factor(&mut self, factor: f32) {
-        self.soft_boundary_sharpness_factor.set(factor);
+    pub fn set_soft_boundary_sharpness_factor(&mut self, factor: f32) -> f32 {
+        self.soft_boundary_sharpness_factor.set(factor)
     }
 
     /// Removes all generated particles.
@@ -344,8 +344,8 @@ impl ParticleSystem {
     }
 
     /// Sets new texture for particle system.
-    pub fn set_texture(&mut self, texture: Option<Texture>) {
-        self.texture.set(texture);
+    pub fn set_texture(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        self.texture.set(texture)
     }
 
     /// Returns current texture used by particle system.
@@ -392,12 +392,14 @@ impl NodeTrait for ParticleSystem {
     }
 
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager.clone());
+
         let mut state = resource_manager.state();
         let texture_container = &mut state.containers_mut().textures;
         texture_container.try_restore_template_resource(&mut self.texture);
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
     }
 
@@ -472,7 +474,7 @@ impl NodeTrait for ParticleSystem {
 /// This is typical implementation of Builder pattern.
 pub struct ParticleSystemBuilder {
     base_builder: BaseBuilder,
-    emitters: Vec<Emitter>,
+    emitters: Vec<EmitterWrapper>,
     texture: Option<Texture>,
     acceleration: Vector3<f32>,
     particles: Vec<Particle>,
@@ -498,7 +500,7 @@ impl ParticleSystemBuilder {
 
     /// Sets desired emitters for particle system.
     pub fn with_emitters(mut self, emitters: Vec<Emitter>) -> Self {
-        self.emitters = emitters;
+        self.emitters = emitters.into_iter().map(EmitterWrapper).collect();
         self
     }
 

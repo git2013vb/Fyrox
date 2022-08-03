@@ -14,24 +14,24 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable, VariableFlags},
         visitor::{Visit, VisitResult, Visitor},
     },
     engine::resource_manager::ResourceManager,
     impl_directly_inheritable_entity_trait,
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         mesh::{
             buffer::{VertexAttributeUsage, VertexReadTrait},
             surface::Surface,
         },
         node::{Node, NodeTrait, TypeUuidProvider, UpdateContext},
-        variable::{InheritError, TemplateVariable, VariableFlags},
         DirectlyInheritableEntity,
     },
 };
-use fxhash::FxHashMap;
 use std::{
     cell::Cell,
     ops::{Deref, DerefMut},
@@ -54,6 +54,7 @@ pub mod vertex;
     Debug,
     Visit,
     Inspect,
+    Reflect,
     AsRefStr,
     EnumString,
     EnumVariantNames,
@@ -87,31 +88,36 @@ impl RenderPath {
 }
 
 /// See module docs.
-#[derive(Debug, Inspect, Clone, Visit)]
+#[derive(Debug, Inspect, Reflect, Clone, Visit)]
 pub struct Mesh {
     #[visit(rename = "Common")]
     base: Base,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_surfaces")]
     surfaces: TemplateVariable<Vec<Surface>>,
 
-    #[inspect(getter = "Deref::deref")]
-    #[visit(optional)]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_render_path")]
     render_path: TemplateVariable<RenderPath>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_decal_layer_index")]
     decal_layer_index: TemplateVariable<u8>,
 
     #[inspect(skip)]
     #[visit(skip)]
+    #[reflect(hidden)]
     local_bounding_box: Cell<AxisAlignedBoundingBox>,
 
     #[inspect(skip)]
     #[visit(skip)]
+    #[reflect(hidden)]
     local_bounding_box_dirty: Cell<bool>,
 
     #[inspect(skip)]
     #[visit(skip)]
+    #[reflect(hidden)]
     world_bounding_box: Cell<AxisAlignedBoundingBox>,
 }
 
@@ -159,6 +165,11 @@ impl TypeUuidProvider for Mesh {
 }
 
 impl Mesh {
+    /// Sets surfaces for the mesh.
+    pub fn set_surfaces(&mut self, surfaces: Vec<Surface>) -> Vec<Surface> {
+        self.surfaces.set(surfaces)
+    }
+
     /// Returns shared reference to array of surfaces.
     #[inline]
     pub fn surfaces(&self) -> &[Surface] {
@@ -168,6 +179,7 @@ impl Mesh {
     /// Returns mutable reference to array of surfaces.
     #[inline]
     pub fn surfaces_mut(&mut self) -> &mut [Surface] {
+        self.local_bounding_box_dirty.set(true);
         self.surfaces.get_mut_silent()
     }
 
@@ -186,8 +198,8 @@ impl Mesh {
     }
 
     /// Sets new render path for the mesh.
-    pub fn set_render_path(&mut self, render_path: RenderPath) {
-        self.render_path.set(render_path);
+    pub fn set_render_path(&mut self, render_path: RenderPath) -> RenderPath {
+        self.render_path.set(render_path)
     }
 
     /// Returns current render path of the mesh.
@@ -256,8 +268,8 @@ impl Mesh {
     /// Sets new decal layer index. It defines which decals will be applies to the mesh,
     /// for example iff a decal has index == 0 and a mesh has index == 0, then decals will
     /// be applied. This allows you to apply decals only on needed surfaces.
-    pub fn set_decal_layer_index(&mut self, index: u8) {
-        self.decal_layer_index.set(index);
+    pub fn set_decal_layer_index(&mut self, index: u8) -> u8 {
+        self.decal_layer_index.set(index)
     }
 
     /// Returns current decal index.
@@ -295,19 +307,19 @@ impl NodeTrait for Mesh {
     }
 
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager.clone());
+
         for surface in self.surfaces_mut() {
             surface.material().lock().resolve(resource_manager.clone());
         }
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
 
         for surface in self.surfaces.get_mut_silent() {
             for bone_handle in surface.bones.iter_mut() {
-                if let Some(entry) = old_new_mapping.get(bone_handle) {
-                    *bone_handle = *entry;
-                }
+                old_new_mapping.try_map(bone_handle);
             }
         }
     }

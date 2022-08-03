@@ -22,32 +22,34 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::{Visit, VisitResult, Visitor},
     },
     engine::resource_manager::ResourceManager,
     impl_directly_inheritable_entity_trait,
     scene::{
         base::Base,
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         light::{BaseLight, BaseLightBuilder},
         node::{Node, NodeTrait, TypeUuidProvider},
-        variable::{InheritError, TemplateVariable},
         DirectlyInheritableEntity,
     },
 };
-use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
 
 /// See module docs.
-#[derive(Debug, Inspect, Clone, Visit)]
+#[derive(Debug, Inspect, Reflect, Clone, Visit)]
 pub struct PointLight {
     base_light: BaseLight,
 
-    #[inspect(min_value = 0.0, step = 0.001, getter = "Deref::deref")]
+    #[inspect(min_value = 0.0, step = 0.001, deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_shadow_bias")]
     shadow_bias: TemplateVariable<f32>,
 
-    #[inspect(min_value = 0.0, step = 0.1, getter = "Deref::deref")]
+    #[inspect(min_value = 0.0, step = 0.1, deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_radius")]
     radius: TemplateVariable<f32>,
 }
 
@@ -90,8 +92,8 @@ impl PointLight {
     /// Sets radius of point light. This parameter also affects radius of spherical
     /// light volume that is used in light scattering.
     #[inline]
-    pub fn set_radius(&mut self, radius: f32) {
-        self.radius.set(radius.abs());
+    pub fn set_radius(&mut self, radius: f32) -> f32 {
+        self.radius.set(radius.abs())
     }
 
     /// Returns radius of point light.
@@ -102,8 +104,8 @@ impl PointLight {
 
     /// Sets new shadow bias value. Bias will be used to offset fragment's depth before
     /// compare it with shadow map value, it is used to remove "shadow acne".
-    pub fn set_shadow_bias(&mut self, bias: f32) {
-        self.shadow_bias.set(bias);
+    pub fn set_shadow_bias(&mut self, bias: f32) -> f32 {
+        self.shadow_bias.set(bias)
     }
 
     /// Returns current value of shadow bias.
@@ -138,9 +140,11 @@ impl NodeTrait for PointLight {
         self.reset_self_inheritable_properties();
     }
 
-    fn restore_resources(&mut self, _resource_manager: ResourceManager) {}
+    fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base_light.restore_resources(resource_manager);
+    }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base_light.remap_handles(old_new_mapping);
     }
 

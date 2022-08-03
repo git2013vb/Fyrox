@@ -41,6 +41,7 @@ use crate::{
         instant,
         math::Rect,
         pool::Handle,
+        reflect::Reflect,
         scope_profile,
     },
     engine::resource_manager::{container::event::ResourceEvent, ResourceManager},
@@ -188,6 +189,7 @@ impl std::ops::AddAssign<RenderPassStatistics> for Statistics {
     Serialize,
     Deserialize,
     Inspect,
+    Reflect,
     AsRefStr,
     EnumString,
     EnumVariantNames,
@@ -202,7 +204,7 @@ pub enum ShadowMapPrecision {
 }
 
 /// Cascaded-shadow maps settings.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Inspect)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Inspect, Reflect)]
 pub struct CsmSettings {
     /// Whether cascaded shadow maps enabled or not.
     pub enabled: bool,
@@ -231,7 +233,7 @@ impl Default for CsmSettings {
 
 /// Quality settings allows you to find optimal balance between performance and
 /// graphics quality.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Inspect)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Inspect, Reflect)]
 pub struct QualitySettings {
     /// Point shadows
     /// Size of cube map face of shadow map texture in pixels.
@@ -1171,6 +1173,27 @@ impl Renderer {
         self.scene_render_passes.push(pass);
     }
 
+    /// Removes specified render pass.
+    pub fn remove_render_pass(&mut self, pass: Rc<RefCell<dyn SceneRenderPass>>) {
+        if let Some(index) = self
+            .scene_render_passes
+            .iter()
+            .position(|p| Rc::ptr_eq(p, &pass))
+        {
+            self.scene_render_passes.remove(index);
+        }
+    }
+
+    /// Returns a slice with every registered render passes.
+    pub fn render_passes(&self) -> &[Rc<RefCell<dyn SceneRenderPass>>] {
+        &self.scene_render_passes
+    }
+
+    /// Removes all render passes from the renderer.
+    pub fn clear_render_passes(&mut self) {
+        self.scene_render_passes.clear()
+    }
+
     /// Returns statistics for last frame.
     pub fn get_statistics(&self) -> Statistics {
         self.statistics
@@ -1432,12 +1455,25 @@ impl Renderer {
                     {
                         let width = frame_size.x as usize;
                         let height = frame_size.y as usize;
+
+                        Log::info(format!(
+                            "Associated scene rendering data was re-created for scene {}, because render frame size was changed. Old is {}x{}, new {}x{}!",
+                            scene_handle,
+                            data.gbuffer.width,data.gbuffer.height,width,height
+                        ));
+
                         *data = AssociatedSceneData::new(state, width, height).unwrap();
                     }
                 })
                 .or_insert_with(|| {
                     let width = frame_size.x as usize;
                     let height = frame_size.y as usize;
+
+                    Log::info(format!(
+                        "A new associated scene rendering data was created for scene {}!",
+                        scene_handle
+                    ));
+
                     AssociatedSceneData::new(state, width, height).unwrap()
                 });
 

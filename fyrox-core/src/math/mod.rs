@@ -12,11 +12,12 @@ use crate::{
     algebra::{Matrix3, Matrix4, Scalar, UnitQuaternion, Vector2, Vector3},
     math::ray::IntersectionResult,
     num_traits::{NumAssign, Zero},
+    reflect::Reflect,
     visitor::{Visit, VisitResult, Visitor},
 };
 use std::ops::{Index, IndexMut};
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Reflect)]
 pub struct Rect<T>
 where
     T: NumAssign + Scalar + PartialOrd + Copy,
@@ -412,17 +413,6 @@ pub fn wrap_angle(angle: f32) -> f32 {
         angle % two_pi
     } else {
         (angle + two_pi) % two_pi
-    }
-}
-
-#[inline]
-pub fn clampf(v: f32, min: f32, max: f32) -> f32 {
-    if v < min {
-        min
-    } else if v > max {
-        max
-    } else {
-        v
     }
 }
 

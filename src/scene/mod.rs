@@ -23,11 +23,15 @@ pub mod sound;
 pub mod sprite;
 pub mod terrain;
 pub mod transform;
-pub mod variable;
 pub mod visibility;
 
+use crate::plugin::Plugin;
+use crate::scene::base::ScriptMessage;
+use crate::scene::graph::map::NodeHandleMap;
+use crate::script::{ScriptContext, ScriptDeinitContext};
 use crate::{
     animation::{machine::container::AnimationMachineContainer, AnimationContainer},
+    core::variable::{InheritError, InheritableVariable},
     core::{
         algebra::Vector2,
         color::Color,
@@ -35,6 +39,7 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         instant,
         pool::{Handle, Pool, Ticket},
+        reflect::Reflect,
         sstorage::ImmutableString,
         visitor::{Visit, VisitError, VisitResult, Visitor},
     },
@@ -52,7 +57,6 @@ use crate::{
         mesh::Mesh,
         node::Node,
         sound::SoundEngine,
-        variable::{InheritError, InheritableVariable},
     },
     utils::{lightmap::Lightmap, log::Log, log::MessageKind, navmesh::Navmesh},
 };
@@ -117,9 +121,9 @@ pub trait DirectlyInheritableEntity: Any {
 #[macro_export]
 macro_rules! impl_directly_inheritable_entity_trait {
     ($ty:ty; $($name:ident),*) => {
-        impl crate::scene::DirectlyInheritableEntity for $ty {
+        impl $crate::scene::DirectlyInheritableEntity for $ty {
             fn inheritable_properties_ref(&self)
-                -> Vec<&dyn crate::scene::variable::InheritableVariable>
+                -> Vec<&dyn $crate::core::variable::InheritableVariable>
             {
                 vec![
                     $(&self.$name),*
@@ -127,7 +131,7 @@ macro_rules! impl_directly_inheritable_entity_trait {
             }
 
             fn inheritable_properties_mut(&mut self)
-                -> Vec<&mut dyn crate::scene::variable::InheritableVariable>
+                -> Vec<&mut dyn $crate::core::variable::InheritableVariable>
             {
                 vec![
                     $(&mut self.$name),*
@@ -219,7 +223,7 @@ impl IndexMut<Handle<Navmesh>> for NavMeshContainer {
 }
 
 /// See module docs.
-#[derive(Debug, Inspect)]
+#[derive(Debug, Inspect, Reflect)]
 pub struct Scene {
     /// Graph is main container for all scene nodes. It calculates global transforms for nodes,
     /// updates them and performs all other important work. See `graph` module docs for more
@@ -229,6 +233,7 @@ pub struct Scene {
     /// Animations container controls all animation on scene. Each animation can have tracks which
     /// has handles to graph nodes. See `animation` module docs for more info.
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub animations: AnimationContainer,
 
     /// Texture to draw scene to. If empty, scene will be drawn on screen directly.
@@ -239,22 +244,27 @@ pub struct Scene {
     /// monitor. Other usage could be previewer of models, like pictogram of character
     /// in real-time strategies, in other words there are plenty of possible uses.
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub render_target: Option<Texture>,
 
     /// Drawing context for simple graphics.
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub drawing_context: SceneDrawingContext,
 
     /// A container for navigational meshes.
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub navmeshes: NavMeshContainer,
 
     /// Current lightmap.
     #[inspect(skip)]
+    #[reflect(hidden)]
     lightmap: Option<Lightmap>,
 
     /// Performance statistics from last `update` call.
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub performance_statistics: PerformanceStatistics,
 
     /// Color of ambient lighting.
@@ -271,6 +281,7 @@ pub struct Scene {
 
     /// A container for animation blending state machines.
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub animation_machines: AnimationMachineContainer,
 }
 
@@ -491,7 +502,7 @@ impl Scene {
 
     /// Synchronizes the state of the scene with external resources.
     pub async fn resolve(&mut self, resource_manager: ResourceManager) {
-        Log::writeln(MessageKind::Information, "Starting resolve...".to_owned());
+        Log::writeln(MessageKind::Information, "Starting resolve...");
 
         self.graph.resolve();
         self.animations.resolve(&self.graph);
@@ -562,8 +573,7 @@ impl Scene {
                     Log::writeln(
                         MessageKind::Warning,
                         "Failed to get surface data patch while resolving lightmap!\
-                    This means that surface has changed and lightmap must be regenerated!"
-                            .to_owned(),
+                    This means that surface has changed and lightmap must be regenerated!",
                     );
                 }
             }
@@ -592,7 +602,7 @@ impl Scene {
             }
         }
 
-        Log::writeln(MessageKind::Information, "Resolve succeeded!".to_owned());
+        Log::writeln(MessageKind::Information, "Resolve succeeded!");
     }
 
     /// Tries to set new lightmap to scene.
@@ -649,7 +659,7 @@ impl Scene {
 
     /// Creates deep copy of a scene, filter predicate allows you to filter out nodes
     /// by your criteria.
-    pub fn clone<F>(&self, filter: &mut F) -> (Self, FxHashMap<Handle<Node>, Handle<Node>>)
+    pub fn clone<F>(&self, filter: &mut F) -> (Self, NodeHandleMap)
     where
         F: FnMut(Handle<Node>, &Node) -> bool,
     {
@@ -657,16 +667,20 @@ impl Scene {
         let mut animations = self.animations.clone();
         for animation in animations.iter_mut() {
             // Remove all tracks for nodes that were filtered out.
-            animation.retain_tracks(|track| old_new_map.contains_key(&track.get_node()));
+            animation.retain_tracks(|track| old_new_map.map.contains_key(&track.get_node()));
             // Remap track nodes.
             for track in animation.get_tracks_mut() {
-                track.set_node(old_new_map[&track.get_node()]);
+                track.set_node(old_new_map.map[&track.get_node()]);
             }
         }
 
         let mut animation_machines = self.animation_machines.clone();
         for machine in animation_machines.iter_mut() {
-            machine.root = old_new_map.get(&machine.root).cloned().unwrap_or_default();
+            machine.root = old_new_map
+                .map
+                .get(&machine.root)
+                .cloned()
+                .unwrap_or_default();
         }
 
         (
@@ -715,20 +729,73 @@ impl Scene {
 
         self.visit(region_name, visitor)
     }
+
+    pub(crate) fn discard_script_messages(&mut self) {
+        while self.graph.script_message_receiver.try_recv().is_ok() {
+            // Drop messages one by one.
+        }
+    }
+
+    pub(crate) fn handle_script_messages(
+        &mut self,
+        plugins: &mut [Box<dyn Plugin>],
+        resource_manager: &ResourceManager,
+    ) {
+        while let Ok(message) = self.graph.script_message_receiver.try_recv() {
+            match message {
+                ScriptMessage::DestroyScript { mut script, handle } => {
+                    if let Some(plugin) =
+                        plugins.iter_mut().find(|p| p.id() == script.plugin_uuid())
+                    {
+                        script.on_deinit(ScriptDeinitContext {
+                            plugin: &mut **plugin,
+                            resource_manager,
+                            scene: self,
+                            node_handle: handle,
+                        })
+                    }
+                }
+                ScriptMessage::InitializeScript { handle } => {
+                    if let Some(mut script) =
+                        self.graph.try_get_mut(handle).and_then(|n| n.script.take())
+                    {
+                        if let Some(plugin) =
+                            plugins.iter_mut().find(|p| p.id() == script.plugin_uuid())
+                        {
+                            script.on_init(ScriptContext {
+                                dt: 0.0,
+                                plugin: &mut **plugin,
+                                handle,
+                                scene: self,
+                                resource_manager,
+                            });
+
+                            // Put script back to node, checked borrow is used because the node might be deleted
+                            // on initialization.
+                            if let Some(node) = self.graph.try_get_mut(handle) {
+                                node.script = Some(script);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Container for scenes in the engine.
-#[derive(Default)]
 pub struct SceneContainer {
     pool: Pool<Scene>,
     sound_engine: Arc<Mutex<SoundEngine>>,
+    pub(crate) destruction_list: Vec<(Handle<Scene>, Scene)>,
 }
 
 impl SceneContainer {
-    pub(in crate) fn new(sound_engine: Arc<Mutex<SoundEngine>>) -> Self {
+    pub(crate) fn new(sound_engine: Arc<Mutex<SoundEngine>>) -> Self {
         Self {
             pool: Pool::new(),
             sound_engine,
+            destruction_list: Default::default(),
         }
     }
 
@@ -785,14 +852,14 @@ impl SceneContainer {
         self.pool.clear()
     }
 
-    /// Removes given scene from container.
+    /// Removes given scene from container. The scene will be destroyed on a next update call.
     #[inline]
     pub fn remove(&mut self, handle: Handle<Scene>) {
         self.sound_engine
             .lock()
             .unwrap()
             .remove_context(self.pool[handle].graph.sound_context.native.clone());
-        self.pool.free(handle);
+        self.destruction_list.push((handle, self.pool.free(handle)));
     }
 
     /// Takes scene from the container and transfers ownership to caller. You must either

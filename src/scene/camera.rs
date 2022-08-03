@@ -20,7 +20,9 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, frustum::Frustum, ray::Ray, Rect},
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::{Visit, VisitResult, Visitor},
     },
     engine::resource_manager::ResourceManager,
@@ -28,14 +30,14 @@ use crate::{
     resource::texture::{Texture, TextureError, TextureKind, TexturePixelKind, TextureWrapMode},
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         node::{Node, NodeTrait, TypeUuidProvider, UpdateContext},
-        variable::{InheritError, TemplateVariable},
         visibility::VisibilityCache,
         DirectlyInheritableEntity,
     },
+    utils::log::Log,
 };
-use fxhash::FxHashMap;
+use fyrox_resource::ResourceState;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -45,7 +47,7 @@ use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 /// Perspective projection make parallel lines to converge at some point. Objects will be smaller
 /// with increasing distance. This the projection type "used" by human eyes, photographic lens and
 /// it looks most realistic.
-#[derive(Inspect, Clone, Debug, PartialEq, Visit)]
+#[derive(Inspect, Reflect, Clone, Debug, PartialEq, Visit)]
 pub struct PerspectiveProjection {
     /// Horizontal angle between look axis and a side of the viewing frustum. Larger values will
     /// increase field of view and create fish-eye effect, smaller values could be used to create
@@ -85,7 +87,7 @@ impl PerspectiveProjection {
 
 /// Parallel projection. Object's size won't be affected by distance from the viewer, it can be
 /// used for 2D games.
-#[derive(Inspect, Clone, Debug, PartialEq, Visit)]
+#[derive(Inspect, Reflect, Clone, Debug, PartialEq, Visit)]
 pub struct OrthographicProjection {
     /// Location of the near clipping plane.
     #[inspect(min_value = 0.0, step = 0.1)]
@@ -130,7 +132,9 @@ impl OrthographicProjection {
 /// objects will look smaller with increasing distance.
 /// 2) Orthographic projection most useful for 2D games, objects won't look smaller with increasing
 /// distance.  
-#[derive(Inspect, Clone, Debug, PartialEq, Visit, AsRefStr, EnumString, EnumVariantNames)]
+#[derive(
+    Inspect, Reflect, Clone, Debug, PartialEq, Visit, AsRefStr, EnumString, EnumVariantNames,
+)]
 pub enum Projection {
     /// See [`PerspectiveProjection`] docs.
     Perspective(PerspectiveProjection),
@@ -215,7 +219,9 @@ impl Default for Projection {
 
 /// Exposure is a parameter that describes how many light should be collected for one
 /// frame. The higher the value, the more brighter the final frame will be and vice versa.
-#[derive(Visit, Copy, Clone, PartialEq, Debug, Inspect, AsRefStr, EnumString, EnumVariantNames)]
+#[derive(
+    Visit, Copy, Clone, PartialEq, Debug, Inspect, Reflect, AsRefStr, EnumString, EnumVariantNames,
+)]
 pub enum Exposure {
     /// Automatic exposure based on the frame luminance. High luminance values will result
     /// in lower exposure levels and vice versa. This is default option.
@@ -250,49 +256,56 @@ impl Default for Exposure {
 }
 
 /// See module docs.
-#[derive(Debug, Visit, Inspect, Clone)]
+#[derive(Debug, Visit, Inspect, Reflect, Clone)]
 pub struct Camera {
     base: Base,
 
-    #[inspect(getter = "Deref::deref")]
-    #[visit(optional)] // Backward compatibility
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_projection")]
     projection: TemplateVariable<Projection>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_viewport")]
     viewport: TemplateVariable<Rect<f32>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_enabled")]
     enabled: TemplateVariable<bool>,
 
-    #[inspect(getter = "Deref::deref")]
-    sky_box: TemplateVariable<Option<Box<SkyBox>>>,
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_skybox")]
+    sky_box: TemplateVariable<Option<SkyBox>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_environment")]
     environment: TemplateVariable<Option<Texture>>,
 
-    #[inspect(getter = "Deref::deref")]
-    #[visit(optional)] // Backward compatibility.
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_exposure")]
     exposure: TemplateVariable<Exposure>,
 
-    #[inspect(getter = "Deref::deref")]
-    #[visit(optional)] // Backward compatibility.
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_color_grading_lut")]
     color_grading_lut: TemplateVariable<Option<ColorGradingLut>>,
 
-    #[inspect(getter = "Deref::deref")]
-    #[visit(optional)] // Backward compatibility.
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_color_grading_enabled")]
     color_grading_enabled: TemplateVariable<bool>,
 
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     view_matrix: Matrix4<f32>,
 
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     projection_matrix: Matrix4<f32>,
 
     /// Visibility cache allows you to quickly check if object is visible from the camera or not.
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub visibility_cache: VisibilityCache,
 }
 
@@ -353,13 +366,12 @@ impl Camera {
     /// Why not just use pixels directly? Because you can change resolution while
     /// your application is running and you'd be force to manually recalculate
     /// pixel values everytime when resolution changes.
-    pub fn set_viewport(&mut self, mut viewport: Rect<f32>) -> &mut Self {
+    pub fn set_viewport(&mut self, mut viewport: Rect<f32>) -> Rect<f32> {
         viewport.position.x = viewport.position.x.clamp(0.0, 1.0);
         viewport.position.y = viewport.position.y.clamp(0.0, 1.0);
         viewport.size.x = viewport.size.x.clamp(0.0, 1.0);
         viewport.size.y = viewport.size.y.clamp(0.0, 1.0);
-        self.viewport.set(viewport);
-        self
+        self.viewport.set(viewport)
     }
 
     /// Returns current viewport.
@@ -430,8 +442,8 @@ impl Camera {
 
     /// Sets current projection mode.
     #[inline]
-    pub fn set_projection(&mut self, projection: Projection) {
-        self.projection.set(projection);
+    pub fn set_projection(&mut self, projection: Projection) -> Projection {
+        self.projection.set(projection)
     }
 
     /// Returns state of camera: enabled or not.
@@ -444,36 +456,33 @@ impl Camera {
     /// rendering. This allows you to exclude views from specific cameras from
     /// final picture.
     #[inline]
-    pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
-        self.enabled.set(enabled);
-        self
+    pub fn set_enabled(&mut self, enabled: bool) -> bool {
+        self.enabled.set(enabled)
     }
 
     /// Sets new skybox. Could be None if no skybox needed.
-    pub fn set_skybox(&mut self, skybox: Option<SkyBox>) -> &mut Self {
-        self.sky_box.set(skybox.map(Box::new));
-        self
+    pub fn set_skybox(&mut self, skybox: Option<SkyBox>) -> Option<SkyBox> {
+        self.sky_box.set(skybox)
     }
 
     /// Return optional mutable reference to current skybox.
     pub fn skybox_mut(&mut self) -> Option<&mut SkyBox> {
-        self.sky_box.get_mut().as_deref_mut()
+        self.sky_box.get_mut().as_mut()
     }
 
     /// Return optional shared reference to current skybox.
     pub fn skybox_ref(&self) -> Option<&SkyBox> {
-        self.sky_box.as_deref()
+        self.sky_box.as_ref()
     }
 
     /// Replaces the skybox.
-    pub fn replace_skybox(&mut self, new: Option<Box<SkyBox>>) -> Option<Box<SkyBox>> {
+    pub fn replace_skybox(&mut self, new: Option<SkyBox>) -> Option<SkyBox> {
         std::mem::replace(self.sky_box.get_mut(), new)
     }
 
     /// Sets new environment.
-    pub fn set_environment(&mut self, environment: Option<Texture>) -> &mut Self {
-        self.environment.set(environment);
-        self
+    pub fn set_environment(&mut self, environment: Option<Texture>) -> Option<Texture> {
+        self.environment.set(environment)
     }
 
     /// Return optional mutable reference to current environment.
@@ -531,8 +540,11 @@ impl Camera {
     }
 
     /// Sets new color grading LUT.
-    pub fn set_color_grading_map(&mut self, lut: Option<ColorGradingLut>) {
-        self.color_grading_lut.set(lut);
+    pub fn set_color_grading_lut(
+        &mut self,
+        lut: Option<ColorGradingLut>,
+    ) -> Option<ColorGradingLut> {
+        self.color_grading_lut.set(lut)
     }
 
     /// Returns current color grading map.
@@ -546,8 +558,8 @@ impl Camera {
     }
 
     /// Enables or disables color grading.
-    pub fn set_color_grading_enabled(&mut self, enable: bool) {
-        self.color_grading_enabled.set(enable);
+    pub fn set_color_grading_enabled(&mut self, enable: bool) -> bool {
+        self.color_grading_enabled.set(enable)
     }
 
     /// Whether color grading enabled or not.
@@ -556,8 +568,8 @@ impl Camera {
     }
 
     /// Sets new exposure. See `Exposure` struct docs for more info.
-    pub fn set_exposure(&mut self, exposure: Exposure) {
-        self.exposure.set(exposure);
+    pub fn set_exposure(&mut self, exposure: Exposure) -> Exposure {
+        self.exposure.set(exposure)
     }
 
     /// Returns current exposure value.
@@ -596,6 +608,8 @@ impl NodeTrait for Camera {
     }
 
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager.clone());
+
         let mut state = resource_manager.state();
         let texture_container = &mut state.containers_mut().textures;
         texture_container.try_restore_template_resource(&mut self.environment);
@@ -610,7 +624,7 @@ impl NodeTrait for Camera {
         }
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
     }
 
@@ -665,11 +679,10 @@ pub enum ColorGradingLutCreationError {
 /// games - this is achieved by color grading.
 ///
 /// See [more info in Unreal engine docs](https://docs.unrealengine.com/4.26/en-US/RenderingAndGraphics/PostProcessEffects/UsingLUTs/)
-#[derive(Visit, Clone, Default, PartialEq, Debug, Inspect)]
+#[derive(Visit, Clone, Default, PartialEq, Debug, Inspect, Reflect)]
 pub struct ColorGradingLut {
     #[visit(skip)]
     lut: Option<Texture>,
-    #[inspect(skip)]
     unwrapped_lut: Option<Texture>,
 }
 
@@ -914,7 +927,7 @@ impl CameraBuilder {
             view_matrix: Matrix4::identity(),
             projection_matrix: Matrix4::identity(),
             visibility_cache: Default::default(),
-            sky_box: self.skybox.map(Box::new).into(),
+            sky_box: self.skybox.into(),
             environment: self.environment.into(),
             exposure: self.exposure.into(),
             color_grading_lut: self.color_grading_lut.into(),
@@ -1009,24 +1022,37 @@ impl SkyBoxBuilder {
 /// skies and/or some other objects (mountains, buildings, etc.). Usually skyboxes used
 /// in outdoor scenes, however real use of it limited only by your imagination. Skybox
 /// will be drawn first, none of objects could be drawn before skybox.
-#[derive(Debug, Clone, Default, PartialEq, Inspect, Visit)]
+#[derive(Debug, Clone, Default, PartialEq, Inspect, Reflect, Visit)]
 pub struct SkyBox {
     /// Texture for front face.
-    pub(in crate) front: Option<Texture>,
+    #[reflect(setter = "set_front")]
+    pub(crate) front: Option<Texture>,
+
     /// Texture for back face.
-    pub(in crate) back: Option<Texture>,
+    #[reflect(setter = "set_back")]
+    pub(crate) back: Option<Texture>,
+
     /// Texture for left face.
-    pub(in crate) left: Option<Texture>,
+    #[reflect(setter = "set_left")]
+    pub(crate) left: Option<Texture>,
+
     /// Texture for right face.
-    pub(in crate) right: Option<Texture>,
+    #[reflect(setter = "set_right")]
+    pub(crate) right: Option<Texture>,
+
     /// Texture for top face.
-    pub(in crate) top: Option<Texture>,
+    #[reflect(setter = "set_top")]
+    pub(crate) top: Option<Texture>,
+
     /// Texture for bottom face.
-    pub(in crate) bottom: Option<Texture>,
+    #[reflect(setter = "set_bottom")]
+    pub(crate) bottom: Option<Texture>,
+
     /// Cubemap texture
     #[inspect(skip)]
     #[visit(skip)]
-    pub(in crate) cubemap: Option<Texture>,
+    #[reflect(hidden)]
+    pub(crate) cubemap: Option<Texture>,
 }
 
 /// An error that may occur during skybox creation.
@@ -1036,6 +1062,37 @@ pub enum SkyBoxError {
     UnsupportedTextureKind(TextureKind),
     /// Cube map was failed to build.
     UnableToBuildCubeMap,
+    /// Input texture is not square.
+    NonSquareTexture {
+        /// Texture index.
+        index: usize,
+        /// Width of the faulty texture.
+        width: u32,
+        /// Height of the faulty texture.
+        height: u32,
+    },
+    /// Some input texture differs in size or pixel kind.
+    DifferentTexture {
+        /// Actual width of the first valid texture in the input set.
+        expected_width: u32,
+        /// Actual height of the first valid texture in the input set.
+        expected_height: u32,
+        /// Actual pixel kind of the first valid texture in the input set.
+        expected_pixel_kind: TexturePixelKind,
+        /// Index of the faulty input texture.
+        index: usize,
+        /// Width of the faulty texture.
+        actual_width: u32,
+        /// Height of the faulty texture.
+        actual_height: u32,
+        /// Pixel kind of the faulty texture.
+        actual_pixel_kind: TexturePixelKind,
+    },
+    /// Occurs when one of the input textures is either still loading or failed to load.
+    TextureIsNotReady {
+        /// Index of the faulty input texture.
+        index: usize,
+    },
 }
 
 impl SkyBox {
@@ -1049,12 +1106,71 @@ impl SkyBox {
         self.cubemap.as_ref()
     }
 
+    /// Validates input set of texture and checks if it possible to create a cube map from them.
+    /// There are two main conditions for successful cube map creation:
+    /// - All textures must have same width and height, and width must be equal to height.
+    /// - All textures must have same pixel kind.
+    pub fn validate(&self) -> Result<(), SkyBoxError> {
+        struct TextureInfo {
+            pixel_kind: TexturePixelKind,
+            width: u32,
+            height: u32,
+        }
+
+        let mut first_info: Option<TextureInfo> = None;
+
+        for (index, texture) in self.textures().iter().enumerate() {
+            if let Some(texture) = texture {
+                if let ResourceState::Ok(texture) = &*texture.state() {
+                    if let TextureKind::Rectangle { width, height } = texture.kind() {
+                        if width != height {
+                            return Err(SkyBoxError::NonSquareTexture {
+                                index,
+                                width,
+                                height,
+                            });
+                        }
+
+                        if let Some(first_info) = first_info.as_mut() {
+                            if first_info.width != width
+                                || first_info.height != height
+                                || first_info.pixel_kind != texture.pixel_kind()
+                            {
+                                return Err(SkyBoxError::DifferentTexture {
+                                    expected_width: first_info.width,
+                                    expected_height: first_info.height,
+                                    expected_pixel_kind: first_info.pixel_kind,
+                                    index,
+                                    actual_width: width,
+                                    actual_height: height,
+                                    actual_pixel_kind: texture.pixel_kind(),
+                                });
+                            }
+                        } else {
+                            first_info = Some(TextureInfo {
+                                pixel_kind: texture.pixel_kind(),
+                                width,
+                                height,
+                            });
+                        }
+                    }
+                } else {
+                    return Err(SkyBoxError::TextureIsNotReady { index });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Creates a cubemap using provided faces. If some face has not been provided corresponding side will be black.
     ///
     /// # Important notes.
     ///
     /// It will fail if provided face's kind is not TextureKind::Rectangle.
     pub fn create_cubemap(&mut self) -> Result<(), SkyBoxError> {
+        self.validate()?;
+
         let (kind, pixel_kind, bytes_per_face) =
             self.textures().iter().find(|face| face.is_some()).map_or(
                 (
@@ -1119,6 +1235,13 @@ impl SkyBox {
         ]
     }
 
+    /// Set new texture for the left side of the skybox.
+    pub fn set_left(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        let prev = std::mem::replace(&mut self.left, texture);
+        Log::verify(self.create_cubemap());
+        prev
+    }
+
     /// Returns a texture that is used for left face of the cube map.
     ///
     /// # Important notes.
@@ -1126,6 +1249,13 @@ impl SkyBox {
     /// This textures is not used for rendering! The renderer uses cube map made of face textures.
     pub fn left(&self) -> Option<Texture> {
         self.left.clone()
+    }
+
+    /// Set new texture for the right side of the skybox.
+    pub fn set_right(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        let prev = std::mem::replace(&mut self.right, texture);
+        Log::verify(self.create_cubemap());
+        prev
     }
 
     /// Returns a texture that is used for right face of the cube map.
@@ -1137,6 +1267,13 @@ impl SkyBox {
         self.right.clone()
     }
 
+    /// Set new texture for the top side of the skybox.
+    pub fn set_top(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        let prev = std::mem::replace(&mut self.top, texture);
+        Log::verify(self.create_cubemap());
+        prev
+    }
+
     /// Returns a texture that is used for top face of the cube map.
     ///
     /// # Important notes.
@@ -1144,6 +1281,13 @@ impl SkyBox {
     /// This textures is not used for rendering! The renderer uses cube map made of face textures.
     pub fn top(&self) -> Option<Texture> {
         self.top.clone()
+    }
+
+    /// Set new texture for the bottom side of the skybox.
+    pub fn set_bottom(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        let prev = std::mem::replace(&mut self.bottom, texture);
+        Log::verify(self.create_cubemap());
+        prev
     }
 
     /// Returns a texture that is used for bottom face of the cube map.
@@ -1155,6 +1299,13 @@ impl SkyBox {
         self.bottom.clone()
     }
 
+    /// Set new texture for the front side of the skybox.
+    pub fn set_front(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        let prev = std::mem::replace(&mut self.front, texture);
+        Log::verify(self.create_cubemap());
+        prev
+    }
+
     /// Returns a texture that is used for front face of the cube map.
     ///
     /// # Important notes.
@@ -1162,6 +1313,13 @@ impl SkyBox {
     /// This textures is not used for rendering! The renderer uses cube map made of face textures.
     pub fn front(&self) -> Option<Texture> {
         self.front.clone()
+    }
+
+    /// Set new texture for the back side of the skybox.
+    pub fn set_back(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        let prev = std::mem::replace(&mut self.back, texture);
+        Log::verify(self.create_cubemap());
+        prev
     }
 
     /// Returns a texture that is used for back face of the cube map.

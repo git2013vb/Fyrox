@@ -2,24 +2,27 @@
 
 use crate::{
     core::{
+        define_is_as,
         inspect::{Inspect, PropertyInfo},
         pool::Handle,
+        reflect::Reflect,
+        variable::{InheritableVariable, TemplateVariable},
         visitor::prelude::*,
     },
     define_with,
-    scene::{node::Node, sound::context::SoundContext, variable::TemplateVariable},
+    scene::{node::Node, sound::context::SoundContext},
 };
-use fyrox_core::define_is_as;
 use fyrox_sound::dsp::filters::Biquad;
 use std::{
     cell::Cell,
     ops::{Deref, DerefMut},
 };
+use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 
 const DEFAULT_FC: f32 = 0.25615; // 11296 Hz at 44100 Hz sample rate
 
 /// Effect input allows you to setup a source of samples for an effect with an optional filtering.
-#[derive(Visit, Inspect, Debug, Default, Clone)]
+#[derive(Visit, Inspect, Reflect, Debug, Default, Clone, PartialEq)]
 pub struct EffectInput {
     /// A sound node that will be the source of samples for the effect.
     pub sound: Handle<Node>,
@@ -28,16 +31,23 @@ pub struct EffectInput {
 }
 
 /// Base effect contains common properties for every effect (gain, inputs, etc.)
-#[derive(Visit, Inspect, Debug)]
+#[derive(Visit, Inspect, Reflect, Debug, Clone)]
 pub struct BaseEffect {
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_name_internal")]
     pub(crate) name: TemplateVariable<String>,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_gain")]
     pub(crate) gain: TemplateVariable<f32>,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_inputs")]
     pub(crate) inputs: TemplateVariable<Vec<EffectInput>>,
+
     #[visit(skip)]
     #[inspect(skip)]
+    #[reflect(hidden)]
     pub(crate) native: Cell<Handle<fyrox_sound::effects::Effect>>,
 }
 
@@ -48,8 +58,13 @@ impl BaseEffect {
     }
 
     /// Sets master gain of the effect.
-    pub fn set_gain(&mut self, gain: f32) {
-        self.gain.set(gain);
+    pub fn set_gain(&mut self, gain: f32) -> f32 {
+        self.gain.set(gain)
+    }
+
+    /// Sets new inputs for the effect.
+    pub fn set_inputs(&mut self, inputs: Vec<EffectInput>) -> Vec<EffectInput> {
+        self.inputs.set(inputs)
     }
 
     /// Returns shared reference to the inputs array.
@@ -74,7 +89,11 @@ impl BaseEffect {
 
     /// Sets new name of the effect.
     pub fn set_name<S: AsRef<str>>(&mut self, name: S) {
-        self.name.set(name.as_ref().to_owned());
+        self.set_name_internal(name.as_ref().to_owned());
+    }
+
+    fn set_name_internal(&mut self, name: String) -> String {
+        self.name.set(name)
     }
 }
 
@@ -90,18 +109,10 @@ impl Default for BaseEffect {
 }
 
 /// All possible effects in the engine.
-#[derive(Visit, Debug)]
+#[derive(Visit, Reflect, Inspect, Debug, AsRefStr, EnumString, EnumVariantNames, Clone)]
 pub enum Effect {
     /// See [`ReverbEffect`] docs.
     Reverb(ReverbEffect),
-}
-
-impl Inspect for Effect {
-    fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        match self {
-            Effect::Reverb(v) => v.properties(),
-        }
-    }
 }
 
 impl Deref for Effect {
@@ -182,16 +193,24 @@ impl BaseEffectBuilder {
 }
 
 /// Reverb effect gives you multiple echoes.
-#[derive(Visit, Inspect, Debug)]
+#[derive(Visit, Inspect, Reflect, Debug, Clone)]
 pub struct ReverbEffect {
     pub(crate) base: BaseEffect,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_dry")]
     pub(crate) dry: TemplateVariable<f32>,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_wet")]
     pub(crate) wet: TemplateVariable<f32>,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_fc")]
     pub(crate) fc: TemplateVariable<f32>,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_decay_time")]
     pub(crate) decay_time: TemplateVariable<f32>,
 }
 
@@ -224,8 +243,8 @@ impl DerefMut for ReverbEffect {
 impl ReverbEffect {
     /// Sets how much of input signal should be passed to output without any processing.
     /// Default value is 1.0.
-    pub fn set_dry(&mut self, dry: f32) {
-        self.dry.set(dry.min(1.0).max(0.0));
+    pub fn set_dry(&mut self, dry: f32) -> f32 {
+        self.dry.set(dry.min(1.0).max(0.0))
     }
 
     /// Returns dry part.
@@ -238,8 +257,8 @@ impl ReverbEffect {
     /// 1.0 - right is left, left is right.
     /// 0.5 - left is (left + right) * 0.5, right is (left + right) * 0.5
     /// and so on.
-    pub fn set_wet(&mut self, wet: f32) {
-        self.wet.set(wet.min(1.0).max(0.0));
+    pub fn set_wet(&mut self, wet: f32) -> f32 {
+        self.wet.set(wet.min(1.0).max(0.0))
     }
 
     /// Returns stereo mixing coefficient.
@@ -249,8 +268,8 @@ impl ReverbEffect {
 
     /// Sets desired duration of reverberation, the more size your environment has,
     /// the larger duration of reverberation should be.
-    pub fn set_decay_time(&mut self, decay_time: f32) {
-        self.decay_time.set(decay_time);
+    pub fn set_decay_time(&mut self, decay_time: f32) -> f32 {
+        self.decay_time.set(decay_time)
     }
 
     /// Returns current decay time.
@@ -269,8 +288,8 @@ impl ReverbEffect {
     /// This method uses normalized frequency as input, this means that you should divide your desired
     /// frequency in hertz by sample rate of sound context. Context has `normalize_frequency` method
     /// exactly for this purpose.
-    pub fn set_fc(&mut self, fc: f32) {
-        self.fc.set(fc);
+    pub fn set_fc(&mut self, fc: f32) -> f32 {
+        self.fc.set(fc)
     }
 
     /// Returns cutoff frequency of lowpass filter in comb filters.

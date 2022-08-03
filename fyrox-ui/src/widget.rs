@@ -418,8 +418,26 @@ impl Widget {
     }
 
     #[inline]
-    pub fn actual_size(&self) -> Vector2<f32> {
+    pub fn actual_local_size(&self) -> Vector2<f32> {
         self.actual_local_size.get()
+    }
+
+    /// Returns size of the widget without any layout or rendering transform applied.
+    #[inline]
+    pub fn actual_initial_size(&self) -> Vector2<f32> {
+        Rect::new(
+            0.0,
+            0.0,
+            self.actual_local_size.get().x,
+            self.actual_local_size.get().y,
+        )
+        .transform(&self.visual_transform.try_inverse().unwrap_or_default())
+        .size
+    }
+
+    #[inline]
+    pub fn actual_global_size(&self) -> Vector2<f32> {
+        self.screen_bounds().size
     }
 
     #[inline]
@@ -903,6 +921,7 @@ impl Widget {
     #[inline]
     pub(in crate) fn set_children(&mut self, children: Vec<Handle<UiNode>>) {
         self.invalidate_layout();
+        self.request_update_visibility();
         self.children = children;
     }
 
@@ -929,7 +948,7 @@ impl Widget {
 
     #[inline]
     pub fn center(&self) -> Vector2<f32> {
-        self.actual_local_position() + self.actual_size().scale(0.5)
+        self.actual_local_position() + self.actual_local_size().scale(0.5)
     }
 
     #[inline]
@@ -948,11 +967,16 @@ impl Widget {
         if self.visibility != visibility {
             self.visibility = visibility;
             self.invalidate_layout();
-            if let Some(layout_events_sender) = self.layout_events_sender.as_ref() {
-                let _ = layout_events_sender.send(LayoutEvent::VisibilityChanged(self.handle));
-            }
+            self.request_update_visibility();
         }
         self
+    }
+
+    #[inline]
+    pub fn request_update_visibility(&self) {
+        if let Some(layout_events_sender) = self.layout_events_sender.as_ref() {
+            let _ = layout_events_sender.send(LayoutEvent::VisibilityChanged(self.handle));
+        }
     }
 
     #[inline]

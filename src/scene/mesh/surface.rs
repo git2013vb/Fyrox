@@ -12,6 +12,7 @@ use crate::{
         math::TriangleDefinition,
         parking_lot::Mutex,
         pool::{ErasedHandle, Handle},
+        reflect::Reflect,
         sparse::AtomicIndex,
         visitor::{Visit, VisitResult, Visitor},
     },
@@ -23,7 +24,7 @@ use crate::{
                 TriangleBuffer, VertexAttributeDescriptor, VertexAttributeUsage, VertexBuffer,
                 VertexFetchError, VertexReadTrait, VertexWriteTrait,
             },
-            vertex::{OldVertex, StaticVertex},
+            vertex::StaticVertex,
         },
         node::Node,
     },
@@ -44,7 +45,7 @@ pub struct SurfaceData {
     // If true - indicates that surface was generated and does not have reference
     // resource. Procedural data will be serialized.
     is_procedural: bool,
-    pub(in crate) cache_entry: AtomicIndex<CacheEntry<framework::geometry_buffer::GeometryBuffer>>,
+    pub(crate) cache_entry: AtomicIndex<CacheEntry<framework::geometry_buffer::GeometryBuffer>>,
 }
 
 impl SurfaceData {
@@ -852,29 +853,8 @@ impl Visit for SurfaceData {
         self.is_procedural.visit("IsProcedural", &mut region)?;
 
         if self.is_procedural {
-            if self
-                .vertex_buffer
-                .visit("VertexBuffer", &mut region)
-                .is_err()
-                && region.is_reading()
-            {
-                // Backward compatibility
-                let mut old_vertices = Vec::<OldVertex>::new();
-                old_vertices.visit("Vertices", &mut region)?;
-                self.vertex_buffer =
-                    VertexBuffer::new(old_vertices.len(), OldVertex::layout(), old_vertices)
-                        .unwrap();
-            };
-            if self
-                .geometry_buffer
-                .visit("GeometryBuffer", &mut region)
-                .is_err()
-                && region.is_reading()
-            {
-                let mut triangles = Vec::<TriangleDefinition>::new();
-                triangles.visit("Triangles", &mut region)?;
-                self.geometry_buffer = TriangleBuffer::new(triangles);
-            }
+            self.vertex_buffer.visit("VertexBuffer", &mut region)?;
+            self.geometry_buffer.visit("GeometryBuffer", &mut region)?
         }
 
         Ok(())
@@ -960,12 +940,13 @@ impl VertexWeightSet {
 }
 
 /// See module docs.
-#[derive(Debug, Clone, Inspect, Visit)]
+#[derive(Debug, Clone, Inspect, Reflect, Visit)]
 pub struct Surface {
     // Wrapped into option to be able to implement Default for serialization.
     // In normal conditions it must never be None!
+    #[reflect(hidden)]
     data: Option<Arc<Mutex<SurfaceData>>>,
-    #[visit(optional)]
+    #[reflect(hidden)]
     material: Arc<Mutex<Material>>,
     /// Temporal array for FBX conversion needs, it holds skinning data (weight + bone handle)
     /// and will be used to fill actual bone indices and weight in vertices that will be
@@ -975,6 +956,7 @@ pub struct Surface {
     /// associated with vertex in `bones` array and store it as bone index in vertex.
     #[inspect(skip)]
     #[visit(skip)]
+    #[reflect(hidden)]
     pub vertex_weights: Vec<VertexWeightSet>,
     /// Array of handle to scene nodes which are used as bones.
     pub bones: Vec<Handle<Node>>,

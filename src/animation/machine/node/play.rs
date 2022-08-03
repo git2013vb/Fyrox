@@ -9,9 +9,11 @@ use crate::{
     core::{
         inspect::{Inspect, PropertyInfo},
         pool::{Handle, Pool},
+        reflect::Reflect,
         visitor::prelude::*,
     },
 };
+use std::ops::Range;
 use std::{
     cell::{Ref, RefCell},
     ops::{Deref, DerefMut},
@@ -40,10 +42,28 @@ impl DerefMut for PlayAnimation {
     }
 }
 
-#[derive(Default, Debug, Visit, Clone, Inspect)]
+#[derive(Default, Debug, Visit, Clone, Inspect, Reflect)]
+pub struct TimeSlice(pub Range<f32>);
+
+#[derive(Debug, Visit, Clone, Inspect, Reflect)]
 pub struct PlayAnimationDefinition {
     pub base: BasePoseNodeDefinition,
     pub animation: String,
+    #[visit(optional)] // Backward compatibility
+    pub speed: f32,
+    #[visit(optional)] // Backward compatibility
+    pub time_slice: Option<TimeSlice>,
+}
+
+impl Default for PlayAnimationDefinition {
+    fn default() -> Self {
+        Self {
+            base: Default::default(),
+            animation: "".to_string(),
+            speed: 1.0,
+            time_slice: None,
+        }
+    }
 }
 
 impl Deref for PlayAnimationDefinition {

@@ -7,7 +7,7 @@ use crate::{
     message::{MessageDirection, UiMessage},
     vector_image::{Primitive, VectorImageBuilder},
     widget::{Widget, WidgetBuilder, WidgetMessage},
-    BuildContext, Control, HorizontalAlignment, NodeHandleMapping, Thickness, UiNode,
+    BuildContext, Control, HorizontalAlignment, MouseButton, NodeHandleMapping, Thickness, UiNode,
     UserInterface, VerticalAlignment, BRUSH_BRIGHT, BRUSH_DARK, BRUSH_LIGHT, BRUSH_TEXT,
 };
 use fyrox_core::algebra::Vector2;
@@ -56,16 +56,18 @@ impl Control for CheckBox {
 
         if let Some(msg) = message.data::<WidgetMessage>() {
             match msg {
-                WidgetMessage::MouseDown { .. } => {
-                    if message.destination() == self.handle()
-                        || self.widget.has_descendant(message.destination(), ui)
+                WidgetMessage::MouseDown { button, .. } => {
+                    if *button == MouseButton::Left
+                        && (message.destination() == self.handle()
+                            || self.widget.has_descendant(message.destination(), ui))
                     {
                         ui.capture_mouse(self.handle());
                     }
                 }
-                WidgetMessage::MouseUp { .. } => {
-                    if message.destination() == self.handle()
-                        || self.widget.has_descendant(message.destination(), ui)
+                WidgetMessage::MouseUp { button, .. } => {
+                    if *button == MouseButton::Left
+                        && (message.destination() == self.handle()
+                            || self.widget.has_descendant(message.destination(), ui))
                     {
                         ui.release_mouse_capture();
 
@@ -288,15 +290,17 @@ impl CheckBoxBuilder {
 
 #[cfg(test)]
 mod test {
-    use crate::check_box::CheckBoxMessage;
     use crate::{
-        check_box::CheckBoxBuilder, core::algebra::Vector2, message::MessageDirection,
-        widget::WidgetBuilder, UserInterface,
+        check_box::{CheckBoxBuilder, CheckBoxMessage},
+        message::MessageDirection,
+        widget::WidgetBuilder,
+        UserInterface,
     };
+    use fyrox_core::algebra::Vector2;
 
     #[test]
     fn check_box() {
-        let mut ui = UserInterface::new(Vector2::new(1000.0, 1000.0));
+        let mut ui = UserInterface::new(Vector2::new(100.0, 100.0));
 
         assert_eq!(ui.poll_message(), None);
 

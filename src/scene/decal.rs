@@ -8,7 +8,9 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::prelude::*,
     },
     engine::resource_manager::ResourceManager,
@@ -16,13 +18,11 @@ use crate::{
     resource::texture::Texture,
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         node::{Node, NodeTrait, TypeUuidProvider},
-        variable::{InheritError, TemplateVariable},
         DirectlyInheritableEntity,
     },
 };
-use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
 
 /// Decal is an image that gets projected to a geometry of a scene. Blood splatters, bullet holes, scratches
@@ -85,22 +85,24 @@ use std::ops::{Deref, DerefMut};
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Visit, Default, Clone, Inspect)]
+#[derive(Debug, Visit, Default, Clone, Inspect, Reflect)]
 pub struct Decal {
     base: Base,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_diffuse_texture")]
     diffuse_texture: TemplateVariable<Option<Texture>>,
 
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_normal_texture")]
     normal_texture: TemplateVariable<Option<Texture>>,
 
-    #[visit(optional)] // Backward compatibility
-    #[inspect(getter = "Deref::deref")]
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_color")]
     color: TemplateVariable<Color>,
 
-    #[visit(optional)] // Backward compatibility
-    #[inspect(min_value = 0.0, getter = "Deref::deref")]
+    #[inspect(min_value = 0.0, deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_layer")]
     layer: TemplateVariable<u8>,
 }
 
@@ -163,8 +165,8 @@ impl Decal {
     }
 
     /// Sets new color for the decal.
-    pub fn set_color(&mut self, color: Color) {
-        self.color.set(color);
+    pub fn set_color(&mut self, color: Color) -> Color {
+        self.color.set(color)
     }
 
     /// Returns current color of the decal.
@@ -177,8 +179,8 @@ impl Decal {
     /// To "filter" decals all you need to do is to set appropriate layer index to decal, for
     /// example blood splatter decal will have `index == 0` in this case. In case of dynamic
     /// objects (like bots, etc.) index will be 1.
-    pub fn set_layer(&mut self, layer: u8) {
-        self.layer.set(layer);
+    pub fn set_layer(&mut self, layer: u8) -> u8 {
+        self.layer.set(layer)
     }
 
     /// Returns current layer index.
@@ -217,13 +219,15 @@ impl NodeTrait for Decal {
     }
 
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager.clone());
+
         let mut state = resource_manager.state();
         let texture_container = &mut state.containers_mut().textures;
         texture_container.try_restore_template_resource(&mut self.diffuse_texture);
         texture_container.try_restore_template_resource(&mut self.normal_texture);
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
     }
 

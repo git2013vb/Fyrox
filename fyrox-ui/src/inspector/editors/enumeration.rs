@@ -20,6 +20,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+use fyrox_core::reflect::Reflect;
 use std::str::FromStr;
 use std::{
     any::{Any, TypeId},
@@ -31,9 +32,9 @@ use strum::VariantNames;
 
 const LOCAL_SYNC_FLAG: u64 = 0xFF;
 
-pub trait InspectableEnum: Debug + Inspect + 'static {}
+pub trait InspectableEnum: Debug + Inspect + Reflect + Clone + 'static {}
 
-impl<T: Debug + Inspect + 'static> InspectableEnum for T {}
+impl<T: Debug + Inspect + Reflect + Clone + 'static> InspectableEnum for T {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnumPropertyEditorMessage {
@@ -335,7 +336,7 @@ where
                 .into_iter()
                 .map(|name| {
                     DecoratorBuilder::new(BorderBuilder::new(
-                        WidgetBuilder::new().with_height(26.0).with_child(
+                        WidgetBuilder::new().with_child(
                             TextBuilder::new(WidgetBuilder::new())
                                 .with_vertical_text_alignment(VerticalAlignment::Center)
                                 .with_horizontal_text_alignment(HorizontalAlignment::Center)

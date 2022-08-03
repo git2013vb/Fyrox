@@ -8,7 +8,9 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
+        reflect::Reflect,
         uuid::{uuid, Uuid},
+        variable::{InheritError, InheritableVariable, TemplateVariable},
         visitor::{Visit, VisitResult, Visitor},
     },
     engine::resource_manager::ResourceManager,
@@ -16,13 +18,11 @@ use crate::{
     resource::texture::Texture,
     scene::{
         base::{Base, BaseBuilder},
-        graph::Graph,
+        graph::{map::NodeHandleMap, Graph},
         node::{Node, NodeTrait, TypeUuidProvider},
-        variable::{InheritError, TemplateVariable},
         DirectlyInheritableEntity,
     },
 };
-use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
 
 /// Sprite is billboard which always faces towards camera. It can be used as a "model" for bullets, and so on.
@@ -64,16 +64,24 @@ use std::ops::{Deref, DerefMut};
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Inspect, Clone, Visit)]
+#[derive(Debug, Inspect, Reflect, Clone, Visit)]
 pub struct Sprite {
     base: Base,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_texture")]
     texture: TemplateVariable<Option<Texture>>,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_color")]
     color: TemplateVariable<Color>,
-    #[inspect(min_value = 0.0, step = 0.1, getter = "Deref::deref")]
+
+    #[inspect(min_value = 0.0, step = 0.1, deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_size")]
     size: TemplateVariable<f32>,
-    #[inspect(getter = "Deref::deref")]
+
+    #[inspect(deref, is_modified = "is_modified()")]
+    #[reflect(deref, setter = "set_rotation")]
     rotation: TemplateVariable<f32>,
 }
 
@@ -115,8 +123,8 @@ impl Sprite {
     /// will be doubled. Default value is 0.2.    
     ///
     /// Negative values could be used to "inverse" the image on the sprite.
-    pub fn set_size(&mut self, size: f32) {
-        self.size.set(size);
+    pub fn set_size(&mut self, size: f32) -> f32 {
+        self.size.set(size)
     }
 
     /// Returns current size of sprite.
@@ -125,8 +133,8 @@ impl Sprite {
     }
 
     /// Sets new color of sprite. Default is White.
-    pub fn set_color(&mut self, color: Color) {
-        self.color.set(color);
+    pub fn set_color(&mut self, color: Color) -> Color {
+        self.color.set(color)
     }
 
     /// Returns current color of sprite.
@@ -135,8 +143,8 @@ impl Sprite {
     }
 
     /// Sets rotation around "look" axis in radians. Default is 0.0.
-    pub fn set_rotation(&mut self, rotation: f32) {
-        self.rotation.set(rotation);
+    pub fn set_rotation(&mut self, rotation: f32) -> f32 {
+        self.rotation.set(rotation)
     }
 
     /// Returns rotation in radians.
@@ -145,8 +153,8 @@ impl Sprite {
     }
 
     /// Sets new texture for sprite. Default is None.
-    pub fn set_texture(&mut self, texture: Option<Texture>) {
-        self.texture.set(texture);
+    pub fn set_texture(&mut self, texture: Option<Texture>) -> Option<Texture> {
+        self.texture.set(texture)
     }
 
     /// Returns current texture of sprite. Can be None if sprite has no texture.
@@ -186,12 +194,14 @@ impl NodeTrait for Sprite {
     }
 
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
+        self.base.restore_resources(resource_manager.clone());
+
         let mut state = resource_manager.state();
         let texture_container = &mut state.containers_mut().textures;
         texture_container.try_restore_template_resource(&mut self.texture);
     }
 
-    fn remap_handles(&mut self, old_new_mapping: &FxHashMap<Handle<Node>, Handle<Node>>) {
+    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         self.base.remap_handles(old_new_mapping);
     }
 

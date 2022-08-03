@@ -17,13 +17,13 @@
 //!
 //! Currently only FBX (common format in game industry for storing complex 3d models)
 //! and RGS (native Fyroxed format) formats are supported.
-use crate::animation::AnimationContainer;
 use crate::{
-    animation::Animation,
+    animation::{Animation, AnimationContainer},
     asset::{define_new_resource, Resource, ResourceData},
     core::{
         inspect::{Inspect, PropertyInfo},
         pool::Handle,
+        reflect::Reflect,
         visitor::{Visit, VisitError, VisitResult, Visitor},
     },
     engine::{
@@ -31,10 +31,13 @@ use crate::{
         SerializationContext,
     },
     resource::fbx::{self, error::FbxError},
-    scene::{graph::Graph, node::Node, Scene, SceneLoader},
+    scene::{
+        graph::{map::NodeHandleMap, Graph},
+        node::Node,
+        Scene, SceneLoader,
+    },
     utils::log::{Log, MessageKind},
 };
-use fxhash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
@@ -62,6 +65,8 @@ pub struct ModelData {
 
 define_new_resource!(
     /// See module docs.
+    #[derive(Reflect)]
+    #[reflect(hide_all)]
     Model<ModelData, ModelLoadError>
 );
 
@@ -71,7 +76,7 @@ impl Model {
         model_data: &ModelData,
         handle: Handle<Node>,
         dest_graph: &mut Graph,
-    ) -> (Handle<Node>, FxHashMap<Handle<Node>, Handle<Node>>) {
+    ) -> (Handle<Node>, NodeHandleMap) {
         let (root, old_to_new) =
             model_data
                 .scene
@@ -94,7 +99,7 @@ impl Model {
         }
 
         // Fill original handles to instances.
-        for (&old, &new) in old_to_new.iter() {
+        for (&old, &new) in old_to_new.inner().iter() {
             dest_graph[new].original_handle_in_resource = old;
         }
 
@@ -250,6 +255,7 @@ impl Default for ModelData {
     Deserialize,
     Serialize,
     Inspect,
+    Reflect,
     AsRefStr,
     EnumString,
     EnumVariantNames,
@@ -318,7 +324,7 @@ impl MaterialSearchOptions {
 /// ```
 ///
 /// Check documentation of the field of the structure for more info about each parameter.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default, Inspect)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default, Inspect, Reflect)]
 pub struct ModelImportOptions {
     /// See [`MaterialSearchOptions`] docs for more info.
     #[serde(default)]

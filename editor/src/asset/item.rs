@@ -33,6 +33,7 @@ pub enum AssetKind {
     Texture,
     Sound,
     Shader,
+    Absm,
 }
 
 impl Deref for AssetItem {
@@ -61,9 +62,19 @@ impl Control for AssetItem {
     fn draw(&self, drawing_context: &mut DrawingContext) {
         let bounds = self.bounding_rect();
         drawing_context.push_rect_filled(&bounds, None);
-        drawing_context.commit(bounds, self.background(), CommandTexture::None, None);
+        drawing_context.commit(
+            self.clip_bounds(),
+            self.background(),
+            CommandTexture::None,
+            None,
+        );
         drawing_context.push_rect(&bounds, 1.0);
-        drawing_context.commit(bounds, self.foreground(), CommandTexture::None, None);
+        drawing_context.commit(
+            self.clip_bounds(),
+            self.foreground(),
+            CommandTexture::None,
+            None,
+        );
     }
 
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
@@ -147,6 +158,10 @@ impl AssetItemBuilder {
                     "shader" => {
                         kind = AssetKind::Shader;
                         load_image(include_bytes!("../../resources/embed/shader.png"))
+                    }
+                    "absm" => {
+                        kind = AssetKind::Absm;
+                        load_image(include_bytes!("../../resources/embed/absm.png"))
                     }
                     _ => None,
                 });
