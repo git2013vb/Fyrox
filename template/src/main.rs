@@ -289,8 +289,8 @@ fn init_data(base_path: &Path, style: &str) {
 
     let scene_path = data_path.join("scene.rgs");
     match style {
-        "2d" => write_file_binary(scene_path, include_bytes!("../2d.rgs")),
-        "3d" => write_file_binary(scene_path, include_bytes!("../3d.rgs")),
+        "2d" => write_file_binary(scene_path, include_bytes!("2d.rgs")),
+        "3d" => write_file_binary(scene_path, include_bytes!("3d.rgs")),
         _ => println!("Unknown style: {}. Use either `2d` or `3d`", style),
     }
 }
@@ -319,9 +319,7 @@ use crate::GameConstructor;
 use fyrox::{{
     core::{{inspect::prelude::*, uuid::{{Uuid, uuid}}, visitor::prelude::*}},
     engine::resource_manager::ResourceManager,
-    event::Event,
-    gui::inspector::PropertyChanged,
-    handle_object_property_changed, impl_component_provider,
+    event::Event, impl_component_provider,
     scene::{{graph::map::NodeHandleMap, node::TypeUuidProvider}},
     script::{{ScriptContext, ScriptDeinitContext, ScriptTrait}},
 }};
@@ -340,12 +338,6 @@ impl TypeUuidProvider for {name} {{
 }}
 
 impl ScriptTrait for {name} {{
-    fn on_property_changed(&mut self, args: &PropertyChanged) -> bool {{
-        // Use `handle_object_property_changed!(self, args, Self::FOO => foo)` here to handle
-        // changing of object properties.
-        false
-    }}
-
     fn on_init(&mut self, context: ScriptContext) {{
         // Put initialization logic here.
     }}

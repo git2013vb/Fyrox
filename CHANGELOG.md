@@ -1,5 +1,18 @@
-# 0.27 (WIP)
+# 0.27.1
 
+- Fixed `Operation failed! Reason: Modify { value: dyn Reflect }` error.
+- Fixed inability to edit properties of 2d collider shape
+- Fixed inability to edit some properties of Joint2D.
+- Added property editor for `Color Grading Lut` property of the Camera node.
+- Fixed panic when editing cascades properties of directional light.
+- Prevent panic when there's invalid bone handle.
+- Hide `data` field from inspector for Surface, because it has no proper property editor.
+- Fixed terrain layer deletion from the Inspector.
+
+# 0.27
+
+- Added compile-time reflection (huge thanks to [@toyboot4e](https://github.com/toyboot4e))
+- Most editor commands were removed and replaced by universal command based on reflection. 
 - Backward compatibility for native engine data formats was dropped - use FyroxEd 0.13 to convert your scenes to newer
 version.
 - Fixed panic when loading an FBX model with malformed animation curves (when there is only 1 or 2 components animated
@@ -76,6 +89,7 @@ or `3d`
 - Visualize cameras in the editor
 - Context menu for asset items, it is now possible to open, delete, show-in-explorer items and also
 to copy file name and full file path to the clipboard.
+- Visualize point and spot lights in the editor.
 
 # 0.26
 

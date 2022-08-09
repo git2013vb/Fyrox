@@ -150,10 +150,12 @@ pub fn make_property_editors_container(
     >::new(Rc::new(|resource_manager, path| {
         block_on(resource_manager.request_shader(path))
     })));
+    container.insert(InspectablePropertyEditorDefinition::<ColorGradingLut>::new());
     container.insert(InspectablePropertyEditorDefinition::<InteractionGroups>::new());
     container.insert(InspectablePropertyEditorDefinition::<ColliderShape>::new());
     container.insert(InspectablePropertyEditorDefinition::<GeometrySource>::new());
     container.insert(EnumPropertyEditorDefinition::<JointParams>::new());
+    container.insert(EnumPropertyEditorDefinition::<dim2::joint::JointParams>::new());
     container.insert(InspectablePropertyEditorDefinition::<BallJoint>::new());
     container.insert(InspectablePropertyEditorDefinition::<dim2::joint::BallJoint>::new());
     container.insert(InspectablePropertyEditorDefinition::<FixedJoint>::new());
