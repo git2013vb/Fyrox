@@ -2,9 +2,9 @@ use crate::{
     gui::make_dropdown_list_option, inspector::EditorEnvironment, send_sync_message,
     DropdownListBuilder, MSG_SYNC_FLAG,
 };
-use fyrox::engine::SerializationContext;
 use fyrox::{
     core::{pool::Handle, uuid::Uuid},
+    engine::SerializationContext,
     gui::{
         define_constructor,
         dropdown_list::{DropdownList, DropdownListMessage},
@@ -25,6 +25,7 @@ use fyrox::{
 };
 use std::{
     any::{Any, TypeId},
+    cell::Cell,
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::Arc,
@@ -47,6 +48,7 @@ pub struct ScriptPropertyEditor {
     inspector: Handle<UiNode>,
     variant_selector: Handle<UiNode>,
     selected_script_uuid: Option<Uuid>,
+    need_context_update: Cell<bool>,
 }
 
 impl Deref for ScriptPropertyEditor {
@@ -81,6 +83,7 @@ impl Control for ScriptPropertyEditor {
                 && self.selected_script_uuid != *id
             {
                 self.selected_script_uuid = *id;
+                self.need_context_update.set(true);
                 ui.send_message(message.reverse());
             }
         } else if let Some(InspectorMessage::PropertyChanged(property_changed)) =
@@ -176,6 +179,7 @@ impl ScriptPropertyEditorBuilder {
             selected_script_uuid: script_uuid,
             variant_selector,
             inspector,
+            need_context_update: Cell::new(false),
         }))
     }
 }
@@ -272,6 +276,7 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
+            ctx.property_info.description.as_ref(),
             variant_selector,
             {
                 editor = ScriptPropertyEditorBuilder::new(WidgetBuilder::new()).build(
@@ -353,7 +358,11 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
             }
         }
 
-        if instance_ref.selected_script_uuid != value.as_ref().map(|s| s.id()) {
+        if instance_ref.selected_script_uuid != value.as_ref().map(|s| s.id())
+            || instance_ref.need_context_update.get()
+        {
+            instance_ref.need_context_update.set(false);
+
             send_sync_message(
                 ctx.ui,
                 ScriptPropertyEditorMessage::value(
@@ -365,14 +374,19 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
 
             let inspector = instance_ref.inspector;
 
-            let context = InspectorContext::from_object(
-                value,
-                &mut ctx.ui.build_ctx(),
-                ctx.definition_container.clone(),
-                environment,
-                ctx.sync_flag,
-                ctx.layer_index + 1,
-            );
+            let context = value
+                .as_ref()
+                .map(|script| {
+                    InspectorContext::from_object(
+                        script,
+                        &mut ctx.ui.build_ctx(),
+                        ctx.definition_container.clone(),
+                        environment,
+                        ctx.sync_flag,
+                        ctx.layer_index + 1,
+                    )
+                })
+                .unwrap_or_default();
 
             let mut msg = InspectorMessage::context(inspector, MessageDirection::ToWidget, context);
             msg.flags = MSG_SYNC_FLAG;
@@ -387,9 +401,14 @@ impl PropertyEditorDefinition for ScriptPropertyEditorDefinition {
                 .context()
                 .clone();
 
-            if let Err(e) = inspector_ctx.sync(value, ctx.ui, layer_index + 1) {
-                Err(InspectorError::Group(e))
+            if let Some(value) = value.as_ref() {
+                if let Err(e) = inspector_ctx.sync(value, ctx.ui, layer_index + 1) {
+                    Err(InspectorError::Group(e))
+                } else {
+                    Ok(None)
+                }
             } else {
+                // This is not an error, because we can actually have None variant here, because script can be unassigned.
                 Ok(None)
             }
         }

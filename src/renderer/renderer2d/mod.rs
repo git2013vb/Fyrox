@@ -1,5 +1,6 @@
 //! A renderer responsible for drawing 2D scenes.
 
+use crate::renderer::framework::framebuffer::BlendParameters;
 use crate::{
     core::{
         algebra::{Vector2, Vector3, Vector4},
@@ -70,7 +71,7 @@ impl SpriteShader {
     }
 }
 
-pub(in crate) struct Renderer2d {
+pub(crate) struct Renderer2d {
     sprite_shader: SpriteShader,
     quad: Mesh,
     geometry_cache: GeometryCache,
@@ -181,7 +182,7 @@ struct Batch {
 }
 
 impl Renderer2d {
-    pub(in crate) fn new(state: &mut PipelineState) -> Result<Self, FrameworkError> {
+    pub(crate) fn new(state: &mut PipelineState) -> Result<Self, FrameworkError> {
         Ok(Self {
             sprite_shader: SpriteShader::new(state)?,
             quad: Mesh::new_unit_quad(),
@@ -191,11 +192,11 @@ impl Renderer2d {
         })
     }
 
-    pub(in crate) fn update_caches(&mut self, dt: f32) {
+    pub(crate) fn update_caches(&mut self, dt: f32) {
         self.geometry_cache.update(dt);
     }
 
-    pub(in crate) fn render(
+    pub(crate) fn render(
         &mut self,
         state: &mut PipelineState,
         camera: &Camera,
@@ -291,9 +292,12 @@ impl Renderer2d {
                         depth_write: true,
                         stencil_test: None,
                         depth_test: true,
-                        blend: Some(BlendFunc {
-                            sfactor: BlendFactor::SrcAlpha,
-                            dfactor: BlendFactor::OneMinusSrcAlpha,
+                        blend: Some(BlendParameters {
+                            func: BlendFunc::new(
+                                BlendFactor::SrcAlpha,
+                                BlendFactor::OneMinusSrcAlpha,
+                            ),
+                            ..Default::default()
                         }),
                         stencil_op: Default::default(),
                     },

@@ -1,5 +1,3 @@
-pub mod machine;
-
 use crate::{
     asset::ResourceState,
     core::{
@@ -14,11 +12,13 @@ use crate::{
     utils::log::{Log, MessageKind},
 };
 use fxhash::FxHashMap;
-use std::ops::Range;
 use std::{
     collections::VecDeque,
-    ops::{Index, IndexMut},
+    ops::{Index, IndexMut, Range},
 };
+
+pub mod machine;
+pub mod spritesheet;
 
 #[derive(Copy, Clone, Debug, Visit)]
 pub struct KeyFrame {
@@ -279,7 +279,7 @@ pub struct Animation {
     speed: f32,
     looped: bool,
     enabled: bool,
-    pub(in crate) resource: Option<Model>,
+    pub(crate) resource: Option<Model>,
     #[visit(skip)]
     pose: AnimationPose,
     signals: Vec<AnimationSignal>,
@@ -472,7 +472,7 @@ impl Animation {
         let current_time_position = self.get_time_position();
         let new_time_position = current_time_position + dt * self.get_speed();
 
-        for signal in self.signals.iter_mut() {
+        for signal in self.signals.iter_mut().filter(|s| s.enabled) {
             if self.speed >= 0.0
                 && (current_time_position < signal.time && new_time_position >= signal.time)
                 || self.speed < 0.0
@@ -612,14 +612,14 @@ impl Animation {
         None
     }
 
-    pub(in crate) fn restore_resources(&mut self, resource_manager: ResourceManager) {
+    pub(crate) fn restore_resources(&mut self, resource_manager: ResourceManager) {
         if let Some(resource) = self.resource.as_mut() {
             let new_resource = resource_manager.request_model(resource.state().path());
             *resource = new_resource;
         }
     }
 
-    pub(in crate) fn resolve(&mut self, graph: &Graph) {
+    pub(crate) fn resolve(&mut self, graph: &Graph) {
         // Copy key frames from resource for each animation. This is needed because we
         // do not store key frames in save file, but just keep reference to resource
         // from which key frames should be taken on load.
@@ -731,7 +731,7 @@ impl Default for AnimationContainer {
 }
 
 impl AnimationContainer {
-    pub(in crate) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { pool: Pool::new() }
     }
 

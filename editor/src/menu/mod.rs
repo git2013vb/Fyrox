@@ -41,6 +41,9 @@ pub struct Menu {
 pub struct Panels<'b> {
     pub light_panel: Handle<UiNode>,
     pub log_panel: Handle<UiNode>,
+    pub navmesh_panel: Handle<UiNode>,
+    pub audio_panel: Handle<UiNode>,
+    pub command_stack_panel: Handle<UiNode>,
     pub inspector_window: Handle<UiNode>,
     pub world_outliner_window: Handle<UiNode>,
     pub asset_window: Handle<UiNode>,
@@ -92,8 +95,12 @@ pub fn create_menu_item_shortcut(
 }
 
 impl Menu {
-    pub fn new(engine: &mut GameEngine, message_sender: Sender<Message>) -> Self {
-        let file_menu = FileMenu::new(engine);
+    pub fn new(
+        engine: &mut GameEngine,
+        message_sender: Sender<Message>,
+        settings: &Settings,
+    ) -> Self {
+        let file_menu = FileMenu::new(engine, settings);
         let ctx = &mut engine.user_interface.build_ctx();
         let create_entity_menu = CreateEntityRootMenu::new(ctx);
         let edit_menu = EditMenu::new(ctx);

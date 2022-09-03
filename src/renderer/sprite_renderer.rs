@@ -1,3 +1,4 @@
+use crate::renderer::framework::framebuffer::BlendParameters;
 use crate::scene::sprite::Sprite;
 use crate::{
     core::{
@@ -61,7 +62,7 @@ pub struct SpriteRenderer {
     collapsed_quad: GeometryBuffer,
 }
 
-pub(in crate) struct SpriteRenderContext<'a, 'b, 'c> {
+pub(crate) struct SpriteRenderContext<'a, 'b, 'c> {
     pub state: &'a mut PipelineState,
     pub framebuffer: &'b mut FrameBuffer,
     pub graph: &'c Graph,
@@ -86,7 +87,7 @@ impl SpriteRenderer {
     }
 
     #[must_use]
-    pub(in crate) fn render(&mut self, args: SpriteRenderContext) -> RenderPassStatistics {
+    pub(crate) fn render(&mut self, args: SpriteRenderContext) -> RenderPassStatistics {
         scope_profile!();
 
         let mut statistics = RenderPassStatistics::default();
@@ -144,9 +145,9 @@ impl SpriteRenderer {
                     depth_write: false,
                     stencil_test: None,
                     depth_test: true,
-                    blend: Some(BlendFunc {
-                        sfactor: BlendFactor::SrcAlpha,
-                        dfactor: BlendFactor::OneMinusSrcAlpha,
+                    blend: Some(BlendParameters {
+                        func: BlendFunc::new(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
+                        ..Default::default()
                     }),
                     stencil_op: Default::default(),
                 },

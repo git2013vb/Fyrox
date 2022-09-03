@@ -1,13 +1,12 @@
 use crate::{
     inspector::editors::make_property_editors_container,
     settings::{
-        debugging::DebuggingSettings, graphics::GraphicsSettings, model::ModelSettings,
-        move_mode::MoveInteractionModeSettings, rotate_mode::RotateInteractionModeSettings,
-        selection::SelectionSettings,
+        camera::CameraSettings, debugging::DebuggingSettings, graphics::GraphicsSettings,
+        model::ModelSettings, move_mode::MoveInteractionModeSettings, recent::RecentFiles,
+        rotate_mode::RotateInteractionModeSettings, selection::SelectionSettings,
     },
     GameEngine, Message, MSG_SYNC_FLAG,
 };
-use fyrox::gui::inspector::PropertyAction;
 use fyrox::{
     core::{
         inspect::{Inspect, PropertyInfo},
@@ -24,7 +23,7 @@ use fyrox::{
                 inspectable::InspectablePropertyEditorDefinition,
                 PropertyEditorDefinitionContainer,
             },
-            InspectorBuilder, InspectorContext, InspectorMessage, PropertyChanged,
+            InspectorBuilder, InspectorContext, InspectorMessage, PropertyAction, PropertyChanged,
         },
         message::{MessageDirection, UiMessage},
         scroll_viewer::ScrollViewerBuilder,
@@ -40,10 +39,12 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::{fs::File, path::PathBuf, rc::Rc, sync::mpsc::Sender};
 
+pub mod camera;
 pub mod debugging;
 pub mod graphics;
 pub mod model;
 pub mod move_mode;
+pub mod recent;
 pub mod rotate_mode;
 pub mod selection;
 
@@ -62,17 +63,28 @@ pub struct Settings {
     pub move_mode_settings: MoveInteractionModeSettings,
     pub rotate_mode_settings: RotateInteractionModeSettings,
     pub model: ModelSettings,
+    pub camera: CameraSettings,
+    #[inspect(skip)]
+    #[reflect(hidden)]
+    pub recent: RecentFiles,
 }
 
 #[derive(Debug)]
 pub enum SettingsError {
     Io(std::io::Error),
+    RonSpanned(ron::error::SpannedError),
     Ron(ron::Error),
 }
 
 impl From<std::io::Error> for SettingsError {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl From<ron::error::SpannedError> for SettingsError {
+    fn from(e: ron::error::SpannedError) -> Self {
+        Self::RonSpanned(e)
     }
 }
 
@@ -111,6 +123,7 @@ impl Settings {
         container.insert(InspectablePropertyEditorDefinition::<DebuggingSettings>::new());
         container.insert(InspectablePropertyEditorDefinition::<CsmSettings>::new());
         container.insert(InspectablePropertyEditorDefinition::<QualitySettings>::new());
+        container.insert(InspectablePropertyEditorDefinition::<CameraSettings>::new());
         container.insert(InspectablePropertyEditorDefinition::<
             MoveInteractionModeSettings,
         >::new());

@@ -2,7 +2,7 @@
 #![allow(irrefutable_let_patterns)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::large_enum_variant)]
-#![allow(clippy::eval_order_dependence)]
+#![allow(clippy::mixed_read_write_in_expression)]
 // These are useless.
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::inconsistent_struct_constructor)]
@@ -68,6 +68,7 @@ use crate::{
     utils::path_fixer::PathFixer,
     world::{graph::selection::GraphSelection, WorldViewer},
 };
+use fyrox::core::visitor::Visitor;
 use fyrox::{
     core::{
         algebra::{Matrix3, Vector2},
@@ -188,6 +189,12 @@ pub fn create_terrain_layer_material() -> Arc<Mutex<Material>> {
 }
 
 #[derive(Debug)]
+pub enum BuildProfile {
+    Debug,
+    Release,
+}
+
+#[derive(Debug)]
 pub enum Message {
     DoSceneCommand(SceneCommand),
     UndoSceneCommand,
@@ -224,6 +231,8 @@ pub enum Message {
     OpenLoadSceneDialog,
     OpenSaveSceneDialog,
     OpenSaveSceneConfirmationDialog(SaveSceneConfirmationDialogAction),
+    SetBuildProfile(BuildProfile),
+    SaveSelectionAsPrefab(PathBuf),
 }
 
 impl Message {
@@ -292,7 +301,9 @@ pub enum SaveSceneConfirmationDialogAction {
     /// Do nothing.
     None,
     /// Opens `Load Scene` dialog.
-    LoadScene,
+    OpenLoadSceneDialog,
+    /// Load specified scene.
+    LoadScene(PathBuf),
     /// Immediately creates new scene.
     MakeNewScene,
     /// Closes current scene.
@@ -345,7 +356,7 @@ impl SaveSceneConfirmationDialog {
                 match result {
                     MessageBoxResult::No => match self.action {
                         SaveSceneConfirmationDialogAction::None => {}
-                        SaveSceneConfirmationDialogAction::LoadScene => {
+                        SaveSceneConfirmationDialogAction::OpenLoadSceneDialog => {
                             sender.send(Message::OpenLoadSceneDialog).unwrap()
                         }
                         SaveSceneConfirmationDialogAction::MakeNewScene => {
@@ -353,6 +364,9 @@ impl SaveSceneConfirmationDialog {
                         }
                         SaveSceneConfirmationDialogAction::CloseScene => {
                             sender.send(Message::CloseScene).unwrap()
+                        }
+                        SaveSceneConfirmationDialogAction::LoadScene(ref path) => {
+                            sender.send(Message::LoadScene(path.clone())).unwrap()
                         }
                     },
                     MessageBoxResult::Yes => {
@@ -364,7 +378,7 @@ impl SaveSceneConfirmationDialog {
 
                                 match self.action {
                                     SaveSceneConfirmationDialogAction::None => {}
-                                    SaveSceneConfirmationDialogAction::LoadScene => {
+                                    SaveSceneConfirmationDialogAction::OpenLoadSceneDialog => {
                                         sender.send(Message::OpenLoadSceneDialog).unwrap()
                                     }
                                     SaveSceneConfirmationDialogAction::MakeNewScene => {
@@ -372,6 +386,9 @@ impl SaveSceneConfirmationDialog {
                                     }
                                     SaveSceneConfirmationDialogAction::CloseScene => {
                                         sender.send(Message::CloseScene).unwrap()
+                                    }
+                                    SaveSceneConfirmationDialogAction::LoadScene(ref path) => {
+                                        sender.send(Message::LoadScene(path.clone())).unwrap()
                                     }
                                 }
 
@@ -381,7 +398,8 @@ impl SaveSceneConfirmationDialog {
                                 // scene was saved.
                                 match self.action {
                                     SaveSceneConfirmationDialogAction::None => {}
-                                    SaveSceneConfirmationDialogAction::LoadScene
+                                    SaveSceneConfirmationDialogAction::OpenLoadSceneDialog
+                                    | SaveSceneConfirmationDialogAction::LoadScene(_)
                                     | SaveSceneConfirmationDialogAction::MakeNewScene
                                     | SaveSceneConfirmationDialogAction::CloseScene => {
                                         sender.send(Message::OpenSaveSceneDialog).unwrap()
@@ -400,7 +418,7 @@ impl SaveSceneConfirmationDialog {
         if let Message::SaveScene(_) = message {
             match std::mem::replace(&mut self.action, SaveSceneConfirmationDialogAction::None) {
                 SaveSceneConfirmationDialogAction::None => {}
-                SaveSceneConfirmationDialogAction::LoadScene => {
+                SaveSceneConfirmationDialogAction::OpenLoadSceneDialog => {
                     sender.send(Message::OpenLoadSceneDialog).unwrap();
                 }
                 SaveSceneConfirmationDialogAction::MakeNewScene => {
@@ -408,6 +426,9 @@ impl SaveSceneConfirmationDialog {
                 }
                 SaveSceneConfirmationDialogAction::CloseScene => {
                     sender.send(Message::CloseScene).unwrap();
+                }
+                SaveSceneConfirmationDialogAction::LoadScene(path) => {
+                    sender.send(Message::LoadScene(path)).unwrap()
                 }
             }
         }
@@ -444,10 +465,10 @@ pub struct Editor {
     pub inspector: Inspector,
     curve_editor: CurveEditorWindow,
     audio_panel: AudioPanel,
-    #[allow(dead_code)] // TODO
     absm_editor: AbsmEditor,
     mode: Mode,
     build_window: BuildWindow,
+    build_profile: BuildProfile,
 }
 
 impl Editor {
@@ -539,7 +560,7 @@ impl Editor {
 
         let scene_viewer = SceneViewer::new(&mut engine, message_sender.clone());
         let asset_browser = AssetBrowser::new(&mut engine);
-        let menu = Menu::new(&mut engine, message_sender.clone());
+        let menu = Menu::new(&mut engine, message_sender.clone(), &settings);
         let light_panel = LightPanel::new(&mut engine);
         let audio_panel = AudioPanel::new(&mut engine);
 
@@ -730,6 +751,7 @@ impl Editor {
             },
             absm_editor,
             build_window,
+            build_profile: BuildProfile::Debug,
         };
 
         editor.set_interaction_mode(Some(InteractionModeKind::Move));
@@ -765,6 +787,38 @@ impl Editor {
         }
 
         editor
+    }
+
+    fn reload_settings(&mut self) {
+        match Settings::load() {
+            Ok(settings) => {
+                self.settings = settings;
+
+                Log::info("Editor settings were reloaded successfully!");
+
+                self.menu
+                    .file_menu
+                    .update_recent_files_list(&mut self.engine.user_interface, &self.settings);
+
+                match self
+                    .engine
+                    .renderer
+                    .set_quality_settings(&self.settings.graphics.quality)
+                {
+                    Ok(_) => {
+                        Log::info("Graphics settings were applied successfully!");
+                    }
+                    Err(e) => Log::info(format!(
+                        "Failed to apply graphics settings! Reason: {:?}",
+                        e
+                    )),
+                }
+            }
+            Err(e) => Log::info(format!(
+                "Failed to load settings, fallback to default. Reason: {:?}",
+                e
+            )),
+        }
     }
 
     fn set_scene(&mut self, mut scene: Scene, path: Option<PathBuf>) {
@@ -824,6 +878,16 @@ impl Editor {
         self.scene = Some(editor_scene);
 
         self.set_interaction_mode(Some(InteractionModeKind::Move));
+
+        if let Some(path) = path.as_ref() {
+            if !self.settings.recent.scenes.contains(path) {
+                self.settings.recent.scenes.push(path.clone());
+                Log::verify(self.settings.save());
+                self.menu
+                    .file_menu
+                    .update_recent_files_list(&mut self.engine.user_interface, &self.settings);
+            }
+        }
 
         self.scene_viewer.set_title(
             &self.engine.user_interface,
@@ -895,6 +959,16 @@ impl Editor {
                 KeyCode::Key4 => {
                     sender
                         .send(Message::SetInteractionMode(InteractionModeKind::Scale))
+                        .unwrap();
+                }
+                KeyCode::Key5 => {
+                    sender
+                        .send(Message::SetInteractionMode(InteractionModeKind::Navmesh))
+                        .unwrap();
+                }
+                KeyCode::Key6 => {
+                    sender
+                        .send(Message::SetInteractionMode(InteractionModeKind::Terrain))
                         .unwrap();
                 }
                 KeyCode::L if modifiers.control => {
@@ -991,10 +1065,13 @@ impl Editor {
                     asset_window: self.asset_browser.window,
                     light_panel: self.light_panel.window,
                     log_panel: self.log.window,
+                    navmesh_panel: self.navmesh_panel.window,
+                    audio_panel: self.audio_panel.window,
                     configurator_window: self.configurator.window,
                     path_fixer: self.path_fixer.window,
                     curve_editor: &self.curve_editor,
                     absm_editor: &self.absm_editor,
+                    command_stack_panel: self.command_stack_viewer.window,
                 },
                 settings: &mut self.settings,
             },
@@ -1116,17 +1193,21 @@ impl Editor {
             if let Some(path) = scene.path.as_ref().cloned() {
                 self.save_current_scene(path.clone());
 
-                match std::process::Command::new("cargo")
+                let mut process = std::process::Command::new("cargo");
+
+                process
                     .stdout(Stdio::piped())
                     .arg("run")
                     .arg("--package")
-                    .arg("executor")
-                    .arg("--release")
-                    .arg("--")
-                    .arg("--override-scene")
-                    .arg(path)
-                    .spawn()
-                {
+                    .arg("executor");
+
+                if let BuildProfile::Release = self.build_profile {
+                    process.arg("--release");
+                };
+
+                process.arg("--").arg("--override-scene").arg(path);
+
+                match process.spawn() {
                     Ok(mut process) => {
                         let active = Arc::new(AtomicBool::new(true));
 
@@ -1159,14 +1240,18 @@ impl Editor {
         if let Mode::Edit = self.mode {
             if let Some(scene) = self.scene.as_ref() {
                 if scene.path.is_some() {
-                    match std::process::Command::new("cargo")
+                    let mut process = std::process::Command::new("cargo");
+                    process
                         .stdout(Stdio::piped())
                         .arg("build")
                         .arg("--package")
-                        .arg("executor")
-                        .arg("--release")
-                        .spawn()
-                    {
+                        .arg("executor");
+
+                    if let BuildProfile::Release = self.build_profile {
+                        process.arg("--release");
+                    }
+
+                    match process.spawn() {
                         Ok(mut process) => {
                             self.build_window.listen(
                                 process.stdout.take().unwrap(),
@@ -1440,13 +1525,16 @@ impl Editor {
     }
 
     fn configure(&mut self, working_directory: PathBuf) {
-        let engine = &mut self.engine;
-
         assert!(self.scene.is_none());
 
-        self.asset_browser.clear_preview(engine);
+        self.asset_browser.clear_preview(&mut self.engine);
 
         std::env::set_current_dir(working_directory.clone()).unwrap();
+
+        // We must re-read settings, because each project have its own unique settings.
+        self.reload_settings();
+
+        let engine = &mut self.engine;
 
         engine
             .get_window()
@@ -1580,6 +1668,8 @@ impl Editor {
                     .handle_message(&message, editor_scene, &mut self.engine);
             }
 
+            self.scene_viewer.handle_message(&message, &mut self.engine);
+
             match message {
                 Message::DoSceneCommand(command) => {
                     needs_sync |= self.do_scene_command(command);
@@ -1665,6 +1755,12 @@ impl Editor {
                     self.save_scene_dialog
                         .open(&self.engine.user_interface, action);
                 }
+                Message::SetBuildProfile(profile) => {
+                    self.build_profile = profile;
+                }
+                Message::SaveSelectionAsPrefab(path) => {
+                    self.try_save_selection_as_prefab(path);
+                }
             }
         }
 
@@ -1690,7 +1786,9 @@ impl Editor {
 
             let graph = &mut scene.graph;
 
-            editor_scene.camera_controller.update(graph, dt);
+            editor_scene
+                .camera_controller
+                .update(graph, &self.settings.camera, dt);
 
             if let Some(mode) = self.current_interaction_mode {
                 self.interaction_modes[mode as usize].update(
@@ -1703,6 +1801,47 @@ impl Editor {
 
         self.material_editor.update(&mut self.engine);
         self.asset_browser.update(&mut self.engine);
+    }
+
+    fn try_save_selection_as_prefab(&self, path: PathBuf) {
+        if let Some(editor_scene) = self.scene.as_ref() {
+            let source_scene = &self.engine.scenes[editor_scene.scene];
+            let mut dest_scene = Scene::new();
+            if let Selection::Graph(ref graph_selection) = editor_scene.selection {
+                for root_node in graph_selection.root_nodes(&source_scene.graph) {
+                    source_scene
+                        .graph
+                        .copy_node(root_node, &mut dest_scene.graph, &mut |_, _| true);
+                }
+
+                let mut visitor = Visitor::new();
+                match dest_scene.save("Scene", &mut visitor) {
+                    Err(e) => Log::err(format!(
+                        "Failed to save selection as prefab! Reason: {:?}",
+                        e
+                    )),
+                    Ok(_) => {
+                        if let Err(e) = visitor.save_binary(&path) {
+                            Log::err(format!(
+                                "Failed to save selection as prefab! Reason: {:?}",
+                                e
+                            ));
+                        } else {
+                            Log::info(format!(
+                                "Selection was successfully saved as prefab to {:?}!",
+                                path
+                            ))
+                        }
+                    }
+                }
+            } else {
+                Log::warn(
+                    "Unable to selection to prefab, because selection is not scene selection!",
+                );
+            }
+        } else {
+            Log::warn("Unable to save selection to prefab, because there is no scene loaded!");
+        }
     }
 
     pub fn add_game_plugin<P>(&mut self, plugin: P)

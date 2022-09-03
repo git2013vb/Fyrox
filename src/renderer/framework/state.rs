@@ -102,10 +102,59 @@ impl Default for BlendFactor {
     }
 }
 
+#[derive(Copy, Clone, Hash, PartialOrd, PartialEq, Eq, Ord, Deserialize, Visit, Debug)]
+#[repr(u32)]
+pub enum BlendMode {
+    Add = glow::FUNC_ADD,
+    Subtract = glow::FUNC_SUBTRACT,
+    ReverseSubtract = glow::FUNC_REVERSE_SUBTRACT,
+    Min = glow::MIN,
+    Max = glow::MAX,
+}
+
+impl Default for BlendMode {
+    fn default() -> Self {
+        Self::Add
+    }
+}
+
+#[derive(Copy, Clone, Default, PartialOrd, PartialEq, Ord, Eq, Hash, Deserialize, Visit, Debug)]
+pub struct BlendEquation {
+    rgb: BlendMode,
+    alpha: BlendMode,
+}
+
 #[derive(Copy, Clone, PartialOrd, PartialEq, Ord, Eq, Hash, Deserialize, Visit, Debug)]
 pub struct BlendFunc {
     pub sfactor: BlendFactor,
     pub dfactor: BlendFactor,
+    pub alpha_sfactor: BlendFactor,
+    pub alpha_dfactor: BlendFactor,
+}
+
+impl BlendFunc {
+    pub fn new(sfactor: BlendFactor, dfactor: BlendFactor) -> Self {
+        Self {
+            sfactor,
+            dfactor,
+            alpha_sfactor: sfactor,
+            alpha_dfactor: dfactor,
+        }
+    }
+
+    pub fn new_separate(
+        sfactor: BlendFactor,
+        dfactor: BlendFactor,
+        alpha_sfactor: BlendFactor,
+        alpha_dfactor: BlendFactor,
+    ) -> Self {
+        Self {
+            sfactor,
+            dfactor,
+            alpha_sfactor,
+            alpha_dfactor,
+        }
+    }
 }
 
 impl Default for BlendFunc {
@@ -113,6 +162,8 @@ impl Default for BlendFunc {
         Self {
             sfactor: BlendFactor::One,
             dfactor: BlendFactor::Zero,
+            alpha_sfactor: BlendFactor::One,
+            alpha_dfactor: BlendFactor::Zero,
         }
     }
 }
@@ -140,6 +191,7 @@ pub struct PipelineState {
     viewport: Rect<i32>,
 
     blend_func: BlendFunc,
+    blend_equation: BlendEquation,
 
     program: Option<glow::Program>,
     texture_units: [TextureUnit; 32],
@@ -168,7 +220,7 @@ impl Default for TextureUnit {
     }
 }
 
-#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit)]
+#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit, Eq)]
 pub struct ColorMask {
     pub red: bool,
     pub green: bool,
@@ -198,7 +250,7 @@ impl ColorMask {
     }
 }
 
-#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit)]
+#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit, Eq)]
 pub struct StencilFunc {
     pub func: CompareFunc,
     pub ref_value: u32,
@@ -215,7 +267,7 @@ impl Default for StencilFunc {
     }
 }
 
-#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit)]
+#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit, Eq)]
 #[repr(u32)]
 pub enum StencilAction {
     /// Keeps the current value.
@@ -255,7 +307,7 @@ impl Default for StencilAction {
     }
 }
 
-#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit)]
+#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit, Eq)]
 pub struct StencilOp {
     pub fail: StencilAction,
     pub zfail: StencilAction,
@@ -305,6 +357,7 @@ impl PipelineState {
             vao: Default::default(),
             vbo: Default::default(),
             frame_statistics: Default::default(),
+            blend_equation: Default::default(),
         }
     }
 
@@ -473,9 +526,24 @@ impl PipelineState {
             self.blend_func = func;
 
             unsafe {
-                self.gl.blend_func(
+                self.gl.blend_func_separate(
                     self.blend_func.sfactor as u32,
                     self.blend_func.dfactor as u32,
+                    self.blend_func.alpha_sfactor as u32,
+                    self.blend_func.alpha_dfactor as u32,
+                );
+            }
+        }
+    }
+
+    pub fn set_blend_equation(&mut self, equation: BlendEquation) {
+        if self.blend_equation != equation {
+            self.blend_equation = equation;
+
+            unsafe {
+                self.gl.blend_equation_separate(
+                    self.blend_equation.rgb as u32,
+                    self.blend_equation.alpha as u32,
                 );
             }
         }
@@ -646,8 +714,9 @@ impl PipelineState {
     }
 
     pub fn apply_draw_parameters(&mut self, draw_params: &DrawParameters) {
-        if let Some(blend_func) = draw_params.blend {
-            self.set_blend_func(blend_func);
+        if let Some(ref blend_params) = draw_params.blend {
+            self.set_blend_func(blend_params.func);
+            self.set_blend_equation(blend_params.equation);
             self.set_blend(true);
         } else {
             self.set_blend(false);

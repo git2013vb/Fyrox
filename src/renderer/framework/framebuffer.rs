@@ -1,3 +1,4 @@
+use crate::renderer::framework::state::BlendEquation;
 use crate::{
     core::{color::Color, math::Rect, scope_profile, visitor::prelude::*},
     renderer::framework::{
@@ -12,7 +13,7 @@ use glow::HasContext;
 use serde::Deserialize;
 use std::{cell::RefCell, rc::Rc};
 
-#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug)]
+#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Eq)]
 pub enum AttachmentKind {
     Color,
     DepthStencil,
@@ -31,7 +32,7 @@ pub struct FrameBuffer {
     color_attachments: Vec<Attachment>,
 }
 
-#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit)]
+#[derive(Copy, Clone, PartialOrd, PartialEq, Hash, Debug, Deserialize, Visit, Eq)]
 #[repr(u32)]
 pub enum CullFace {
     Back = glow::BACK,
@@ -44,14 +45,20 @@ impl Default for CullFace {
     }
 }
 
-#[derive(Deserialize, Visit, Debug, PartialEq, Clone)]
+#[derive(Deserialize, Default, Visit, Debug, PartialEq, Clone, Eq)]
+pub struct BlendParameters {
+    pub func: BlendFunc,
+    pub equation: BlendEquation,
+}
+
+#[derive(Deserialize, Visit, Debug, PartialEq, Clone, Eq)]
 pub struct DrawParameters {
     pub cull_face: Option<CullFace>,
     pub color_write: ColorMask,
     pub depth_write: bool,
     pub stencil_test: Option<StencilFunc>,
     pub depth_test: bool,
-    pub blend: Option<BlendFunc>,
+    pub blend: Option<BlendParameters>,
     pub stencil_op: StencilOp,
 }
 

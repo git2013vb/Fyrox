@@ -9,8 +9,8 @@ use crate::{
     BuildContext, Control, NodeHandleMapping, UiNode, UserInterface, BRUSH_BRIGHT, BRUSH_LIGHT,
     BRUSH_LIGHTER, BRUSH_LIGHTEST, COLOR_DARKEST, COLOR_LIGHTEST,
 };
-use std::any::{Any, TypeId};
 use std::{
+    any::{Any, TypeId},
     ops::{Deref, DerefMut},
     sync::mpsc::Sender,
 };
@@ -44,48 +44,14 @@ impl DecoratorMessage {
 /// widgets. For example it used to decorate button, items in items control.
 #[derive(Clone)]
 pub struct Decorator {
-    border: Border,
-    normal_brush: Brush,
-    hover_brush: Brush,
-    pressed_brush: Brush,
-    selected_brush: Brush,
-    disabled_brush: Brush,
-    is_selected: bool,
-    is_pressable: bool,
-}
-
-impl Decorator {
-    pub fn border(&self) -> &Border {
-        &self.border
-    }
-
-    pub fn normal_brush(&self) -> &Brush {
-        &self.normal_brush
-    }
-
-    pub fn hover_brush(&self) -> &Brush {
-        &self.hover_brush
-    }
-
-    pub fn pressed_brush(&self) -> &Brush {
-        &self.pressed_brush
-    }
-
-    pub fn selected_brush(&self) -> &Brush {
-        &self.selected_brush
-    }
-
-    pub fn disabled_brush(&self) -> &Brush {
-        &self.disabled_brush
-    }
-
-    pub fn is_pressable(&self) -> bool {
-        self.is_pressable
-    }
-
-    pub fn is_selected(&self) -> bool {
-        self.is_pressable
-    }
+    pub border: Border,
+    pub normal_brush: Brush,
+    pub hover_brush: Brush,
+    pub pressed_brush: Brush,
+    pub selected_brush: Brush,
+    pub disabled_brush: Brush,
+    pub is_selected: bool,
+    pub is_pressable: bool,
 }
 
 impl Deref for Decorator {
@@ -254,6 +220,7 @@ pub struct DecoratorBuilder {
     selected_brush: Option<Brush>,
     disabled_brush: Option<Brush>,
     pressable: bool,
+    selected: bool,
 }
 
 impl DecoratorBuilder {
@@ -266,6 +233,7 @@ impl DecoratorBuilder {
             selected_brush: None,
             disabled_brush: None,
             pressable: true,
+            selected: false,
         }
     }
 
@@ -299,8 +267,14 @@ impl DecoratorBuilder {
         self
     }
 
+    pub fn with_selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
     pub fn build(mut self, ui: &mut BuildContext) -> Handle<UiNode> {
         let normal_brush = self.normal_brush.unwrap_or(BRUSH_LIGHT);
+        let selected_brush = self.selected_brush.unwrap_or(BRUSH_BRIGHT);
 
         if self.border_builder.widget_builder.foreground.is_none() {
             self.border_builder.widget_builder.foreground = Some(Brush::LinearGradient {
@@ -325,18 +299,22 @@ impl DecoratorBuilder {
 
         let mut border = self.border_builder.build_border();
 
-        border.set_background(normal_brush.clone());
+        if self.selected {
+            border.set_background(selected_brush.clone());
+        } else {
+            border.set_background(normal_brush.clone());
+        }
 
         let node = UiNode::new(Decorator {
             border,
             normal_brush,
             hover_brush: self.hover_brush.unwrap_or(BRUSH_LIGHTER),
             pressed_brush: self.pressed_brush.unwrap_or(BRUSH_LIGHTEST),
-            selected_brush: self.selected_brush.unwrap_or(BRUSH_BRIGHT),
+            selected_brush,
             disabled_brush: self
                 .disabled_brush
                 .unwrap_or_else(|| Brush::Solid(Color::opaque(50, 50, 50))),
-            is_selected: false,
+            is_selected: self.selected,
             is_pressable: self.pressable,
         });
         ui.add_node(node)

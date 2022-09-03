@@ -1,10 +1,9 @@
-use crate::inspector::editors::PropertyEditorTranslationContext;
 use crate::{
     core::inspect::Inspect,
     inspector::{
         editors::{
             PropertyEditorBuildContext, PropertyEditorDefinition, PropertyEditorInstance,
-            PropertyEditorMessageContext,
+            PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
         make_expander_container, FieldKind, Inspector, InspectorBuilder, InspectorContext,
         InspectorError, InspectorMessage, PropertyChanged,
@@ -73,6 +72,7 @@ where
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
+            ctx.property_info.description.as_ref(),
             Handle::NONE,
             {
                 editor = InspectorBuilder::new(WidgetBuilder::new())

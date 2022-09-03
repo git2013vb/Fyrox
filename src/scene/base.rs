@@ -30,7 +30,7 @@ use std::{
 use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 
 /// A handle to scene node that will be controlled by LOD system.
-#[derive(Inspect, Reflect, Default, Debug, Clone, Copy, PartialEq, Hash)]
+#[derive(Inspect, Reflect, Default, Debug, Clone, Copy, PartialEq, Hash, Eq)]
 pub struct LodControlledObject(pub Handle<Node>);
 
 impl Deref for LodControlledObject {
@@ -406,6 +406,12 @@ pub struct Base {
     pub(crate) original_handle_in_resource: Handle<Node>,
 
     // Current script of the scene node.
+    //
+    // # Important notes
+    //
+    // WARNING: Setting a new script via reflection will break normal script destruction process!
+    // Use it at your own risk only when you're completely sure what you are doing.
+    #[reflect(setter = "set_script_internal")]
     pub(crate) script: Option<Script>,
 }
 
@@ -748,6 +754,10 @@ impl Base {
         }
     }
 
+    fn set_script_internal(&mut self, script: Option<Script>) -> Option<Script> {
+        std::mem::replace(&mut self.script, script)
+    }
+
     /// Returns shared reference to current script instance.
     pub fn script(&self) -> Option<&Script> {
         self.script.as_ref()
@@ -792,6 +802,12 @@ impl Base {
 
     // Prefab inheritance resolving.
     pub(crate) fn inherit_properties(&mut self, parent: &Base) -> Result<(), InheritError> {
+        // Inherit script properties.
+        if let (Some(self_script), Some(parent_script)) = (self.script.as_mut(), parent.script()) {
+            self_script
+                .as_directly_inheritable_mut()
+                .try_inherit_self_properties(parent_script.as_directly_inheritable_ref())?;
+        }
         self.local_transform.inherit(parent.local_transform())?;
         self.try_inherit_self_properties(parent)?;
         Ok(())

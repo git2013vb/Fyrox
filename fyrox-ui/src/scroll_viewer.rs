@@ -13,7 +13,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScrollViewerMessage {
     Content(Handle<UiNode>),
     /// Adjusts vertical and horizontal scroll values so given node will be in "view box"
@@ -114,7 +114,7 @@ impl Control for ScrollViewer {
         if let Some(WidgetMessage::MouseWheel { amount, .. }) = message.data::<WidgetMessage>() {
             if self.v_scroll_bar.is_some() && !message.handled() {
                 if let Some(v_scroll_bar) = ui.node(self.v_scroll_bar).cast::<ScrollBar>() {
-                    let old_value = v_scroll_bar.value();
+                    let old_value = v_scroll_bar.value;
                     let new_value = old_value - amount * 17.0;
                     if (old_value - new_value).abs() > f32::EPSILON {
                         message.set_handled(true);
@@ -174,9 +174,8 @@ impl Control for ScrollViewer {
                         {
                             if let Some(scroll_bar) = ui.node(self.v_scroll_bar).cast::<ScrollBar>()
                             {
-                                let visibility = (scroll_bar.max_value() - scroll_bar.min_value())
-                                    .abs()
-                                    >= f32::EPSILON;
+                                let visibility =
+                                    (scroll_bar.max - scroll_bar.min).abs() >= f32::EPSILON;
                                 ui.send_message(WidgetMessage::visibility(
                                     self.v_scroll_bar,
                                     MessageDirection::ToWidget,
@@ -188,9 +187,8 @@ impl Control for ScrollViewer {
                         {
                             if let Some(scroll_bar) = ui.node(self.h_scroll_bar).cast::<ScrollBar>()
                             {
-                                let visibility = (scroll_bar.max_value() - scroll_bar.min_value())
-                                    .abs()
-                                    >= f32::EPSILON;
+                                let visibility =
+                                    (scroll_bar.max - scroll_bar.min).abs() >= f32::EPSILON;
                                 ui.send_message(WidgetMessage::visibility(
                                     self.h_scroll_bar,
                                     MessageDirection::ToWidget,

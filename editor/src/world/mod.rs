@@ -1,4 +1,4 @@
-use crate::utils::window_content;
+use crate::gui::make_image_button_with_tooltip;
 use crate::{
     load_image,
     scene::{
@@ -6,6 +6,7 @@ use crate::{
         EditorScene, Selection,
     },
     send_sync_message,
+    utils::window_content,
     world::{
         graph::{
             item::{SceneItem, SceneItemBuilder, SceneItemMessage},
@@ -132,7 +133,7 @@ fn colorize(handle: Handle<UiNode>, ui: &UserInterface, index: &mut usize) {
                 Color::opaque(60, 60, 60)
             });
 
-            if decorator.normal_brush() != &new_brush {
+            if decorator.normal_brush != new_brush {
                 ui.send_message(DecoratorMessage::normal_brush(
                     handle,
                     MessageDirection::ToWidget,
@@ -188,30 +189,39 @@ impl WorldViewer {
                                     .with_margin(Thickness::uniform(1.0))
                                     .on_row(0)
                                     .with_child({
-                                        collapse_all = ButtonBuilder::new(
-                                            WidgetBuilder::new()
-                                                .with_margin(Thickness::uniform(1.0)),
-                                        )
-                                        .with_text("Collapse All")
-                                        .build(ctx);
+                                        collapse_all = make_image_button_with_tooltip(
+                                            ctx,
+                                            20.0,
+                                            20.0,
+                                            load_image(include_bytes!(
+                                                "../../resources/embed/collapse.png"
+                                            )),
+                                            "Collapse Everything",
+                                        );
                                         collapse_all
                                     })
                                     .with_child({
-                                        expand_all = ButtonBuilder::new(
-                                            WidgetBuilder::new()
-                                                .with_margin(Thickness::uniform(1.0)),
-                                        )
-                                        .with_text("Expand All")
-                                        .build(ctx);
+                                        expand_all = make_image_button_with_tooltip(
+                                            ctx,
+                                            20.0,
+                                            20.0,
+                                            load_image(include_bytes!(
+                                                "../../resources/embed/expand.png"
+                                            )),
+                                            "Expand Everything",
+                                        );
                                         expand_all
                                     })
                                     .with_child({
-                                        locate_selection = ButtonBuilder::new(
-                                            WidgetBuilder::new()
-                                                .with_margin(Thickness::uniform(1.0)),
-                                        )
-                                        .with_text("Locate Selection")
-                                        .build(ctx);
+                                        locate_selection = make_image_button_with_tooltip(
+                                            ctx,
+                                            20.0,
+                                            20.0,
+                                            load_image(include_bytes!(
+                                                "../../resources/embed/locate.png"
+                                            )),
+                                            "Locate Selection",
+                                        );
                                         locate_selection
                                     })
                                     .with_child({
@@ -405,7 +415,7 @@ impl WorldViewer {
                 // Such filtering is needed because we can have links as children in UI.
                 let items = item
                     .tree
-                    .items()
+                    .items
                     .iter()
                     .cloned()
                     .filter(|i| ui.node(*i).cast::<SceneItem<Node>>().is_some())
@@ -478,7 +488,7 @@ impl WorldViewer {
                     }
                 }
             } else if let Some(folder) = ui_node.cast::<Tree>() {
-                if folder.items().is_empty() {
+                if folder.items.is_empty() {
                     let graph_node_item = make_graph_node_item(
                         node,
                         node_handle,
@@ -496,7 +506,7 @@ impl WorldViewer {
                     self.node_to_view_map.insert(node_handle, graph_node_item);
                     self.stack.push((graph_node_item, node_handle));
                 } else {
-                    self.stack.push((folder.items()[0], node_handle));
+                    self.stack.push((folder.items[0], node_handle));
                 }
             }
         }
@@ -519,13 +529,13 @@ impl WorldViewer {
                         );
                     }
 
-                    stack.extend_from_slice(item.tree.items());
+                    stack.extend_from_slice(&item.tree.items);
                 }
             } else if let Some(root) = ui_node.cast::<TreeRoot>() {
                 stack.extend_from_slice(root.items())
             } else if let Some(tree) = ui_node.cast::<Tree>() {
                 // Make sure to take folders into account.
-                stack.extend_from_slice(tree.items())
+                stack.extend_from_slice(&tree.items)
             }
         }
 

@@ -1,3 +1,4 @@
+use crate::renderer::framework::framebuffer::BlendParameters;
 use crate::renderer::framework::geometry_buffer::{GeometryBuffer, GeometryBufferKind};
 use crate::renderer::shadow::csm::CsmRenderContext;
 use crate::scene::light::directional::DirectionalLight;
@@ -120,7 +121,7 @@ pub struct DeferredLightRenderer {
     light_volume: LightVolumeRenderer,
 }
 
-pub(in crate) struct DeferredRendererContext<'a> {
+pub(crate) struct DeferredRendererContext<'a> {
     pub state: &'a mut PipelineState,
     pub scene: &'a Scene,
     pub camera: &'a Camera,
@@ -291,7 +292,7 @@ impl DeferredLightRenderer {
     }
 
     #[must_use]
-    pub(in crate) fn render(
+    pub(crate) fn render(
         &mut self,
         args: DeferredRendererContext,
     ) -> (RenderPassStatistics, LightingStatistics) {
@@ -406,9 +407,9 @@ impl DeferredLightRenderer {
                 depth_write: false,
                 stencil_test: None,
                 depth_test: false,
-                blend: Some(BlendFunc {
-                    sfactor: BlendFactor::SrcAlpha,
-                    dfactor: BlendFactor::OneMinusSrcAlpha,
+                blend: Some(BlendParameters {
+                    func: BlendFunc::new(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
+                    ..Default::default()
                 }),
                 stencil_op: Default::default(),
             },
@@ -647,9 +648,9 @@ impl DeferredLightRenderer {
                     ..Default::default()
                 },
                 depth_test: false,
-                blend: Some(BlendFunc {
-                    sfactor: BlendFactor::One,
-                    dfactor: BlendFactor::One,
+                blend: Some(BlendParameters {
+                    func: BlendFunc::new(BlendFactor::One, BlendFactor::One),
+                    ..Default::default()
                 }),
             };
 
@@ -779,9 +780,9 @@ impl DeferredLightRenderer {
                         depth_write: false,
                         stencil_test: None,
                         depth_test: false,
-                        blend: Some(BlendFunc {
-                            sfactor: BlendFactor::One,
-                            dfactor: BlendFactor::One,
+                        blend: Some(BlendParameters {
+                            func: BlendFunc::new(BlendFactor::One, BlendFactor::One),
+                            ..Default::default()
                         }),
                         stencil_op: Default::default(),
                     },
@@ -796,6 +797,7 @@ impl DeferredLightRenderer {
                             self.csm_renderer.cascades()[1].view_proj_matrix,
                             self.csm_renderer.cascades()[2].view_proj_matrix,
                         ];
+                        let csm_map_size = self.csm_renderer.size() as f32;
 
                         program_binding
                             .set_vector3(&shader.light_direction, &emit_direction)
@@ -830,7 +832,9 @@ impl DeferredLightRenderer {
                             .set_f32_slice(&shader.cascade_distances, &distances)
                             .set_matrix4(&shader.view_matrix, &camera.view_matrix())
                             .set_f32(&shader.shadow_bias, directional.csm_options.shadow_bias())
-                            .set_bool(&shader.shadows_enabled, shadows_enabled);
+                            .set_bool(&shader.shadows_enabled, shadows_enabled)
+                            .set_bool(&shader.soft_shadows, settings.csm_settings.pcf)
+                            .set_f32(&shader.shadow_map_inv_size, 1.0 / csm_map_size);
                     },
                 )
             } else {

@@ -17,7 +17,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ButtonMessage {
     Click,
     Content(ButtonContent),
@@ -30,31 +30,12 @@ impl ButtonMessage {
 
 #[derive(Clone)]
 pub struct Button {
-    widget: Widget,
-    decorator: Handle<UiNode>,
-    content: Handle<UiNode>,
+    pub widget: Widget,
+    pub decorator: Handle<UiNode>,
+    pub content: Handle<UiNode>,
 }
 
 crate::define_widget_deref!(Button);
-
-impl Button {
-    pub fn new(widget: Widget, body: Handle<UiNode>, content: Handle<UiNode>) -> Self {
-        Self {
-            widget,
-            decorator: body,
-            content,
-        }
-    }
-
-    pub fn content(&self) -> Handle<UiNode> {
-        self.content
-    }
-
-    pub fn set_content(&mut self, content: Handle<UiNode>) -> &mut Self {
-        self.content = content;
-        self
-    }
-}
 
 impl Control for Button {
     fn query_component(&self, type_id: TypeId) -> Option<&dyn Any> {
@@ -117,7 +98,7 @@ impl Control for Button {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ButtonContent {
     Text(String),
     Node(Handle<UiNode>),

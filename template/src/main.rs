@@ -279,7 +279,15 @@ fn init_workspace(base_path: &Path) {
         base_path.join("Cargo.toml"),
         r#"
 [workspace]
-members = ["editor", "executor", "game"]"#,
+members = ["editor", "executor", "game"]"
+
+# Optimize the engine in debug builds, but leave project's code non-optimized.
+# By using this technique, you can still debug you code, but engine will be fully
+# optimized and debug builds won't be terribly slow. With this option, you can 
+# compile your game in debug mode, which is much faster (at least x3), than release.
+[profile.dev.package."*"]
+opt-level = 3
+"#,
     );
 }
 
@@ -317,19 +325,22 @@ fn init_script(raw_name: &str) {
             r#"
 use crate::GameConstructor;
 use fyrox::{{
-    core::{{inspect::prelude::*, uuid::{{Uuid, uuid}}, visitor::prelude::*}},
+    core::{{inspect::prelude::*, uuid::{{Uuid, uuid}}, visitor::prelude::*, reflect::Reflect}},
     engine::resource_manager::ResourceManager,
-    event::Event, impl_component_provider,
+    event::Event, impl_component_provider, impl_directly_inheritable_entity_trait,
     scene::{{graph::map::NodeHandleMap, node::TypeUuidProvider}},
     script::{{ScriptContext, ScriptDeinitContext, ScriptTrait}},
 }};
 
-#[derive(Visit, Inspect, Default, Debug, Clone)]
-struct {name} {{
+#[derive(Visit, Reflect, Inspect, Default, Debug, Clone)]
+pub struct {name} {{
     // Add fields here.
 }}
 
 impl_component_provider!({name});
+impl_directly_inheritable_entity_trait!({name};
+    // Add inheritable (TemplateVariable<T>) fields here.
+);
 
 impl TypeUuidProvider for {name} {{
     fn type_uuid() -> Uuid {{

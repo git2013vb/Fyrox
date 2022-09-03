@@ -1,11 +1,11 @@
 use crate::{
-    camera::PickingOptions, gui::make_dropdown_list_option_with_height, load_image,
+    camera::PickingOptions, gui::make_dropdown_list_option,
+    gui::make_dropdown_list_option_with_height, load_image,
     scene::commands::graph::ScaleNodeCommand, utils::enable_widget, AddModelCommand, AssetItem,
-    AssetKind, ChangeSelectionCommand, CommandGroup, DropdownListBuilder, EditorScene, GameEngine,
-    GraphSelection, InteractionMode, InteractionModeKind, Message, Mode, SceneCommand, Selection,
-    SetMeshTextureCommand, Settings,
+    AssetKind, BuildProfile, ChangeSelectionCommand, CommandGroup, DropdownListBuilder,
+    EditorScene, GameEngine, GraphSelection, InteractionMode, InteractionModeKind, Message, Mode,
+    SceneCommand, Selection, SetMeshTextureCommand, Settings,
 };
-use fyrox::gui::utils::make_simple_tooltip;
 use fyrox::{
     core::{
         algebra::{Vector2, Vector3},
@@ -17,9 +17,10 @@ use fyrox::{
     engine::Engine,
     gui::{
         border::BorderBuilder,
-        brush::Brush,
-        button::{ButtonBuilder, ButtonContent, ButtonMessage},
+        brush::{Brush, GradientPoint},
+        button::{Button, ButtonBuilder, ButtonContent, ButtonMessage},
         canvas::CanvasBuilder,
+        decorator::{DecoratorBuilder, DecoratorMessage},
         dropdown_list::DropdownListMessage,
         formatted_text::WrapMode,
         grid::{Column, GridBuilder, Row},
@@ -27,10 +28,13 @@ use fyrox::{
         message::{KeyCode, MessageDirection, MouseButton, UiMessage},
         stack_panel::StackPanelBuilder,
         text::TextBuilder,
+        utils::make_simple_tooltip,
         vec::vec3::{Vec3EditorBuilder, Vec3EditorMessage},
         widget::{WidgetBuilder, WidgetMessage},
         window::{WindowBuilder, WindowMessage, WindowTitle},
         BuildContext, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
+        BRUSH_BRIGHT_BLUE, BRUSH_LIGHT, BRUSH_LIGHTER, BRUSH_LIGHTEST, COLOR_DARKEST,
+        COLOR_LIGHTEST,
     },
     resource::texture::{Texture, TextureState},
     scene::camera::Projection,
@@ -53,6 +57,7 @@ pub struct SceneViewer {
     terrain_mode: Handle<UiNode>,
     camera_projection: Handle<UiNode>,
     switch_mode: Handle<UiNode>,
+    build_profile: Handle<UiNode>,
     sender: Sender<Message>,
     interaction_mode_panel: Handle<UiNode>,
     contextual_actions: Handle<UiNode>,
@@ -63,6 +68,7 @@ fn make_interaction_mode_button(
     ctx: &mut BuildContext,
     image: &[u8],
     tooltip: &str,
+    selected: bool,
 ) -> Handle<UiNode> {
     ButtonBuilder::new(
         WidgetBuilder::new()
@@ -70,6 +76,7 @@ fn make_interaction_mode_button(
                 BorderBuilder::new(
                     WidgetBuilder::new()
                         .with_max_size(Vector2::new(300.0, f32::MAX))
+                        .with_visibility(false)
                         .with_child(
                             TextBuilder::new(
                                 WidgetBuilder::new().with_margin(Thickness::uniform(2.0)),
@@ -82,6 +89,35 @@ fn make_interaction_mode_button(
                 .build(ctx),
             )
             .with_margin(Thickness::uniform(1.0)),
+    )
+    .with_back(
+        DecoratorBuilder::new(
+            BorderBuilder::new(WidgetBuilder::new().with_foreground(Brush::LinearGradient {
+                from: Vector2::new(0.5, 0.0),
+                to: Vector2::new(0.5, 1.0),
+                stops: vec![
+                    GradientPoint {
+                        stop: 0.0,
+                        color: COLOR_LIGHTEST,
+                    },
+                    GradientPoint {
+                        stop: 0.25,
+                        color: COLOR_LIGHTEST,
+                    },
+                    GradientPoint {
+                        stop: 1.0,
+                        color: COLOR_DARKEST,
+                    },
+                ],
+            }))
+            .with_stroke_thickness(Thickness::uniform(1.0)),
+        )
+        .with_normal_brush(BRUSH_LIGHT)
+        .with_hover_brush(BRUSH_LIGHTER)
+        .with_pressed_brush(BRUSH_LIGHTEST)
+        .with_selected_brush(BRUSH_BRIGHT_BLUE)
+        .with_selected(selected)
+        .build(ctx),
     )
     .with_content(
         ImageBuilder::new(
@@ -137,6 +173,7 @@ impl SceneViewer {
         let selection_frame;
         let camera_projection;
         let switch_mode;
+        let build_profile;
 
         let interaction_mode_panel = StackPanelBuilder::new(
             WidgetBuilder::new()
@@ -148,6 +185,7 @@ impl SceneViewer {
                         ctx,
                         include_bytes!("../resources/embed/select.png"),
                         select_mode_tooltip,
+                        true,
                     );
                     select_mode
                 })
@@ -156,6 +194,7 @@ impl SceneViewer {
                         ctx,
                         include_bytes!("../resources/embed/move_arrow.png"),
                         move_mode_tooltip,
+                        false,
                     );
                     move_mode
                 })
@@ -164,6 +203,7 @@ impl SceneViewer {
                         ctx,
                         include_bytes!("../resources/embed/rotate_arrow.png"),
                         rotate_mode_tooltip,
+                        false,
                     );
                     rotate_mode
                 })
@@ -172,6 +212,7 @@ impl SceneViewer {
                         ctx,
                         include_bytes!("../resources/embed/scale_arrow.png"),
                         scale_mode_tooltip,
+                        false,
                     );
                     scale_mode
                 })
@@ -180,6 +221,7 @@ impl SceneViewer {
                         ctx,
                         include_bytes!("../resources/embed/navmesh.png"),
                         navmesh_mode_tooltip,
+                        false,
                     );
                     navmesh_mode
                 })
@@ -188,6 +230,7 @@ impl SceneViewer {
                         ctx,
                         include_bytes!("../resources/embed/terrain.png"),
                         terrain_mode_tooltip,
+                        false,
                     );
                     terrain_mode
                 }),
@@ -197,7 +240,6 @@ impl SceneViewer {
         let contextual_actions = StackPanelBuilder::new(
             WidgetBuilder::new()
                 .on_column(1)
-                .with_margin(Thickness::uniform(1.0))
                 .with_horizontal_alignment(HorizontalAlignment::Right)
                 .with_child({
                     camera_projection = DropdownListBuilder::new(
@@ -220,15 +262,36 @@ impl SceneViewer {
         let top_ribbon = GridBuilder::new(
             WidgetBuilder::new()
                 .with_child({
-                    switch_mode = ButtonBuilder::new(
+                    StackPanelBuilder::new(
                         WidgetBuilder::new()
                             .with_horizontal_alignment(HorizontalAlignment::Right)
-                            .with_margin(Thickness::uniform(1.0))
-                            .with_width(100.0),
+                            .with_child({
+                                switch_mode = ButtonBuilder::new(
+                                    WidgetBuilder::new()
+                                        .with_margin(Thickness::uniform(1.0))
+                                        .with_width(100.0),
+                                )
+                                .with_text("Play")
+                                .build(ctx);
+                                switch_mode
+                            })
+                            .with_child({
+                                build_profile = DropdownListBuilder::new(
+                                    WidgetBuilder::new()
+                                        .with_margin(Thickness::uniform(1.0))
+                                        .with_width(100.0),
+                                )
+                                .with_items(vec![
+                                    make_dropdown_list_option(ctx, "Debug"),
+                                    make_dropdown_list_option(ctx, "Release"),
+                                ])
+                                .with_selected(0)
+                                .build(ctx);
+                                build_profile
+                            }),
                     )
-                    .with_text("Play")
-                    .build(ctx);
-                    switch_mode
+                    .with_orientation(Orientation::Horizontal)
+                    .build(ctx)
                 })
                 .with_child(contextual_actions),
         )
@@ -339,6 +402,7 @@ impl SceneViewer {
             interaction_mode_panel,
             contextual_actions,
             global_position_display,
+            build_profile,
         }
     }
 }
@@ -354,6 +418,41 @@ impl SceneViewer {
 
     pub fn selection_frame(&self) -> Handle<UiNode> {
         self.selection_frame
+    }
+
+    pub fn handle_message(&mut self, message: &Message, engine: &mut Engine) {
+        if let Message::SetInteractionMode(mode) = message {
+            let active_button = match mode {
+                InteractionModeKind::Select => self.select_mode,
+                InteractionModeKind::Move => self.move_mode,
+                InteractionModeKind::Scale => self.scale_mode,
+                InteractionModeKind::Rotate => self.rotate_mode,
+                InteractionModeKind::Navmesh => self.navmesh_mode,
+                InteractionModeKind::Terrain => self.terrain_mode,
+            };
+
+            for mode_button in [
+                self.select_mode,
+                self.move_mode,
+                self.scale_mode,
+                self.rotate_mode,
+                self.navmesh_mode,
+                self.terrain_mode,
+            ] {
+                let decorator = engine
+                    .user_interface
+                    .node(mode_button)
+                    .query_component::<Button>()
+                    .unwrap()
+                    .decorator;
+
+                engine.user_interface.send_message(DecoratorMessage::select(
+                    decorator,
+                    MessageDirection::ToWidget,
+                    mode_button == active_button,
+                ));
+            }
+        }
     }
 
     pub fn handle_ui_message(
@@ -404,21 +503,31 @@ impl SceneViewer {
                 self.sender.send(Message::OpenSettings).unwrap();
             }
         } else if let Some(DropdownListMessage::SelectionChanged(Some(index))) = message.data() {
-            if message.destination() == self.camera_projection
-                && message.direction == MessageDirection::FromWidget
-            {
-                if *index == 0 {
-                    self.sender
-                        .send(Message::SetEditorCameraProjection(Projection::Perspective(
-                            Default::default(),
-                        )))
-                        .unwrap()
-                } else {
-                    self.sender
-                        .send(Message::SetEditorCameraProjection(
-                            Projection::Orthographic(Default::default()),
-                        ))
-                        .unwrap()
+            if message.direction == MessageDirection::FromWidget {
+                if message.destination() == self.camera_projection {
+                    if *index == 0 {
+                        self.sender
+                            .send(Message::SetEditorCameraProjection(Projection::Perspective(
+                                Default::default(),
+                            )))
+                            .unwrap()
+                    } else {
+                        self.sender
+                            .send(Message::SetEditorCameraProjection(
+                                Projection::Orthographic(Default::default()),
+                            ))
+                            .unwrap()
+                    }
+                } else if message.destination() == self.build_profile {
+                    if *index == 0 {
+                        self.sender
+                            .send(Message::SetBuildProfile(BuildProfile::Debug))
+                            .unwrap();
+                    } else {
+                        self.sender
+                            .send(Message::SetBuildProfile(BuildProfile::Release))
+                            .unwrap();
+                    }
                 }
             }
         }
@@ -579,7 +688,9 @@ impl SceneViewer {
 
         let last_pos = *self.last_mouse_pos.get_or_insert(pos);
         let mouse_offset = pos - last_pos;
-        editor_scene.camera_controller.on_mouse_move(mouse_offset);
+        editor_scene
+            .camera_controller
+            .on_mouse_move(mouse_offset, &settings.camera);
         let rel_pos = pos - screen_bounds.position;
 
         if let Some(interaction_mode) = active_interaction_mode {
@@ -676,85 +787,87 @@ impl SceneViewer {
         if let Some(item) = engine.user_interface.node(handle).cast::<AssetItem>() {
             // Make sure all resources loaded with relative paths only.
             // This will make scenes portable.
-            let relative_path = make_relative_path(&item.path);
+            if let Ok(relative_path) = make_relative_path(&item.path) {
+                match item.kind {
+                    AssetKind::Model => {
+                        // No model was loaded yet, do it.
+                        if let Ok(model) = fyrox::core::futures::executor::block_on(
+                            engine.resource_manager.request_model(&item.path),
+                        ) {
+                            let scene = &mut engine.scenes[editor_scene.scene];
 
-            match item.kind {
-                AssetKind::Model => {
-                    // No model was loaded yet, do it.
-                    if let Ok(model) = fyrox::core::futures::executor::block_on(
-                        engine.resource_manager.request_model(&item.path),
-                    ) {
-                        let scene = &mut engine.scenes[editor_scene.scene];
+                            // Instantiate the model.
+                            let instance = model.instantiate(scene);
+                            // Enable instantiated animations.
+                            for &animation in instance.animations.iter() {
+                                scene.animations[animation].set_enabled(true);
+                            }
 
-                        // Instantiate the model.
-                        let instance = model.instantiate(scene);
-                        // Enable instantiated animations.
-                        for &animation in instance.animations.iter() {
-                            scene.animations[animation].set_enabled(true);
+                            // Immediately after extract if from the scene to subgraph. This is required to not violate
+                            // the rule of one place of execution, only commands allowed to modify the scene.
+                            let sub_graph = scene.graph.take_reserve_sub_graph(instance.root);
+                            let animations_container = instance
+                                .animations
+                                .iter()
+                                .map(|&anim| scene.animations.take_reserve(anim))
+                                .collect();
+
+                            let group = vec![
+                                SceneCommand::new(AddModelCommand::new(
+                                    sub_graph,
+                                    animations_container,
+                                )),
+                                // We also want to select newly instantiated model.
+                                SceneCommand::new(ChangeSelectionCommand::new(
+                                    Selection::Graph(GraphSelection::single_or_empty(
+                                        instance.root,
+                                    )),
+                                    editor_scene.selection.clone(),
+                                )),
+                                SceneCommand::new(ScaleNodeCommand::new(
+                                    instance.root,
+                                    Vector3::new(1.0, 1.0, 1.0),
+                                    settings.model.instantiation_scale,
+                                )),
+                            ];
+
+                            self.sender
+                                .send(Message::do_scene_command(CommandGroup::from(group)))
+                                .unwrap();
                         }
-
-                        // Immediately after extract if from the scene to subgraph. This is required to not violate
-                        // the rule of one place of execution, only commands allowed to modify the scene.
-                        let sub_graph = scene.graph.take_reserve_sub_graph(instance.root);
-                        let animations_container = instance
-                            .animations
-                            .iter()
-                            .map(|&anim| scene.animations.take_reserve(anim))
-                            .collect();
-
-                        let group = vec![
-                            SceneCommand::new(AddModelCommand::new(
-                                sub_graph,
-                                animations_container,
-                            )),
-                            // We also want to select newly instantiated model.
-                            SceneCommand::new(ChangeSelectionCommand::new(
-                                Selection::Graph(GraphSelection::single_or_empty(instance.root)),
-                                editor_scene.selection.clone(),
-                            )),
-                            SceneCommand::new(ScaleNodeCommand::new(
-                                instance.root,
-                                Vector3::new(1.0, 1.0, 1.0),
-                                settings.model.instantiation_scale,
-                            )),
-                        ];
-
-                        self.sender
-                            .send(Message::do_scene_command(CommandGroup::from(group)))
-                            .unwrap();
                     }
-                }
-                AssetKind::Texture => {
-                    let cursor_pos = engine.user_interface.cursor_position();
-                    let rel_pos = cursor_pos - screen_bounds.position;
-                    let graph = &engine.scenes[editor_scene.scene].graph;
-                    if let Some(result) = editor_scene.camera_controller.pick(PickingOptions {
-                        cursor_pos: rel_pos,
-                        graph,
-                        editor_objects_root: editor_scene.editor_objects_root,
-                        screen_size: frame_size,
-                        editor_only: false,
-                        filter: |_, _| true,
-                        ignore_back_faces: settings.selection.ignore_back_faces,
-                    }) {
-                        let tex = engine.resource_manager.request_texture(&relative_path);
-                        let texture = tex.clone();
-                        let texture = texture.state();
-                        if let TextureState::Ok(_) = *texture {
-                            let node = &mut engine.scenes[editor_scene.scene].graph[result.node];
+                    AssetKind::Texture => {
+                        let cursor_pos = engine.user_interface.cursor_position();
+                        let rel_pos = cursor_pos - screen_bounds.position;
+                        let graph = &engine.scenes[editor_scene.scene].graph;
+                        if let Some(result) = editor_scene.camera_controller.pick(PickingOptions {
+                            cursor_pos: rel_pos,
+                            graph,
+                            editor_objects_root: editor_scene.editor_objects_root,
+                            screen_size: frame_size,
+                            editor_only: false,
+                            filter: |_, _| true,
+                            ignore_back_faces: settings.selection.ignore_back_faces,
+                        }) {
+                            let tex = engine.resource_manager.request_texture(&relative_path);
+                            let texture = tex.clone();
+                            let texture = texture.state();
+                            if let TextureState::Ok(_) = *texture {
+                                let node =
+                                    &mut engine.scenes[editor_scene.scene].graph[result.node];
 
-                            if node.is_mesh() {
-                                self.sender
-                                    .send(Message::do_scene_command(SetMeshTextureCommand::new(
-                                        result.node,
-                                        tex,
-                                    )))
-                                    .unwrap();
+                                if node.is_mesh() {
+                                    self.sender
+                                        .send(Message::do_scene_command(
+                                            SetMeshTextureCommand::new(result.node, tex),
+                                        ))
+                                        .unwrap();
+                                }
                             }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }

@@ -13,16 +13,16 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Tab {
-    header_button: Handle<UiNode>,
-    content: Handle<UiNode>,
+    pub header_button: Handle<UiNode>,
+    pub content: Handle<UiNode>,
 }
 
 #[derive(Clone)]
 pub struct TabControl {
-    widget: Widget,
-    tabs: Vec<Tab>,
+    pub widget: Widget,
+    pub tabs: Vec<Tab>,
 }
 
 crate::define_widget_deref!(TabControl);

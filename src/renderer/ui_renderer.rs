@@ -1,5 +1,6 @@
 //! See [`UiRenderer`] docs.
 
+use crate::renderer::framework::framebuffer::BlendParameters;
 use crate::{
     asset::Resource,
     core::{
@@ -317,9 +318,9 @@ impl UiRenderer {
                 depth_write: false,
                 stencil_test,
                 depth_test: false,
-                blend: Some(BlendFunc {
-                    sfactor: BlendFactor::SrcAlpha,
-                    dfactor: BlendFactor::OneMinusSrcAlpha,
+                blend: Some(BlendParameters {
+                    func: BlendFunc::new(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
+                    ..Default::default()
                 }),
                 stencil_op: Default::default(),
             };

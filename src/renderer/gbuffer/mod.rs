@@ -10,6 +10,7 @@
 //! now I don't know better solution.
 
 use crate::core::sstorage::ImmutableString;
+use crate::renderer::framework::framebuffer::BlendParameters;
 use crate::renderer::framework::geometry_buffer::{GeometryBuffer, GeometryBufferKind};
 use crate::scene::decal::Decal;
 use crate::{
@@ -52,7 +53,7 @@ pub struct GBuffer {
     render_pass_name: ImmutableString,
 }
 
-pub(in crate) struct GBufferRenderContext<'a, 'b> {
+pub(crate) struct GBufferRenderContext<'a, 'b> {
     pub state: &'a mut PipelineState,
     pub camera: &'b Camera,
     pub geom_cache: &'a mut GeometryCache,
@@ -253,7 +254,7 @@ impl GBuffer {
     }
 
     #[must_use]
-    pub(in crate) fn fill(&mut self, args: GBufferRenderContext) -> RenderPassStatistics {
+    pub(crate) fn fill(&mut self, args: GBufferRenderContext) -> RenderPassStatistics {
         scope_profile!();
 
         let mut statistics = RenderPassStatistics::default();
@@ -373,9 +374,9 @@ impl GBuffer {
                     depth_write: false,
                     stencil_test: None,
                     depth_test: false,
-                    blend: Some(BlendFunc {
-                        sfactor: BlendFactor::SrcAlpha,
-                        dfactor: BlendFactor::OneMinusSrcAlpha,
+                    blend: Some(BlendParameters {
+                        func: BlendFunc::new(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
+                        ..Default::default()
                     }),
                     stencil_op: Default::default(),
                 },

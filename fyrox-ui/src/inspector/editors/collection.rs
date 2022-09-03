@@ -1,5 +1,3 @@
-use crate::inspector::editors::PropertyEditorTranslationContext;
-use crate::inspector::ObjectValue;
 use crate::{
     button::{ButtonBuilder, ButtonMessage},
     core::{inspect::Inspect, pool::Handle},
@@ -8,10 +6,11 @@ use crate::{
         editors::{
             PropertyEditorBuildContext, PropertyEditorDefinition,
             PropertyEditorDefinitionContainer, PropertyEditorInstance,
-            PropertyEditorMessageContext,
+            PropertyEditorMessageContext, PropertyEditorTranslationContext,
         },
         make_expander_container, CollectionChanged, FieldKind, Inspector, InspectorBuilder,
-        InspectorContext, InspectorEnvironment, InspectorError, InspectorMessage, PropertyChanged,
+        InspectorContext, InspectorEnvironment, InspectorError, InspectorMessage, ObjectValue,
+        PropertyChanged,
     },
     message::{MessageDirection, UiMessage},
     stack_panel::StackPanelBuilder,
@@ -28,7 +27,7 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     inspector: Handle<UiNode>,
     remove: Handle<UiNode>,
@@ -40,12 +39,12 @@ impl<T: Inspect + Clone + Reflect + Debug + Default + 'static> CollectionItem fo
 
 #[derive(Debug)]
 pub struct CollectionEditor<T: CollectionItem> {
-    widget: Widget,
-    add: Handle<UiNode>,
-    items: Vec<Item>,
-    panel: Handle<UiNode>,
-    layer_index: usize,
-    phantom: PhantomData<T>,
+    pub widget: Widget,
+    pub add: Handle<UiNode>,
+    pub items: Vec<Item>,
+    pub panel: Handle<UiNode>,
+    pub layer_index: usize,
+    pub phantom: PhantomData<T>,
 }
 
 impl<T: CollectionItem> Clone for CollectionEditor<T> {
@@ -75,7 +74,7 @@ impl<T: CollectionItem> DerefMut for CollectionEditor<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Eq)]
 pub enum CollectionEditorMessage {
     Items(Vec<Item>),
 }
@@ -189,6 +188,7 @@ fn create_item_views(
             make_expander_container(
                 layer_index,
                 &format!("Item {}", n),
+                &format!("Item {} of the collection", n),
                 item.remove,
                 item.inspector,
                 ctx,
@@ -386,6 +386,7 @@ where
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
+            ctx.property_info.description.as_ref(),
             add,
             {
                 editor = CollectionEditorBuilder::new(

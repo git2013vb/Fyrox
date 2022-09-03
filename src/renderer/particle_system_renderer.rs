@@ -1,4 +1,5 @@
 use crate::core::sstorage::ImmutableString;
+use crate::renderer::framework::framebuffer::BlendParameters;
 use crate::renderer::framework::state::{BlendFactor, BlendFunc};
 use crate::scene::particle_system::ParticleSystem;
 use crate::{
@@ -71,7 +72,7 @@ pub struct ParticleSystemRenderer {
     sorted_particles: Vec<u32>,
 }
 
-pub(in crate) struct ParticleSystemRenderContext<'a, 'b, 'c> {
+pub(crate) struct ParticleSystemRenderContext<'a, 'b, 'c> {
     pub state: &'a mut PipelineState,
     pub framebuffer: &'b mut FrameBuffer,
     pub graph: &'c Graph,
@@ -134,7 +135,7 @@ impl ParticleSystemRenderer {
     }
 
     #[must_use]
-    pub(in crate) fn render(&mut self, args: ParticleSystemRenderContext) -> RenderPassStatistics {
+    pub(crate) fn render(&mut self, args: ParticleSystemRenderContext) -> RenderPassStatistics {
         scope_profile!();
 
         let mut statistics = RenderPassStatistics::default();
@@ -185,9 +186,9 @@ impl ParticleSystemRenderer {
                 depth_write: false,
                 stencil_test: None,
                 depth_test: true,
-                blend: Some(BlendFunc {
-                    sfactor: BlendFactor::SrcAlpha,
-                    dfactor: BlendFactor::OneMinusSrcAlpha,
+                blend: Some(BlendParameters {
+                    func: BlendFunc::new(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
+                    ..Default::default()
                 }),
                 stencil_op: Default::default(),
             };

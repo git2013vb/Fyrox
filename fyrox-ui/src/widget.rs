@@ -332,72 +332,72 @@ impl WidgetMessage {
 
 #[derive(Debug, Clone)]
 pub struct Widget {
-    pub(in crate) handle: Handle<UiNode>,
-    name: String,
+    pub handle: Handle<UiNode>,
+    pub name: String,
     /// Desired position relative to parent node
-    desired_local_position: Vector2<f32>,
+    pub desired_local_position: Vector2<f32>,
     /// Explicit width for node or automatic if NaN (means value is undefined). Default is NaN
-    width: f32,
+    pub width: f32,
     /// Explicit height for node or automatic if NaN (means value is undefined). Default is NaN
-    height: f32,
+    pub height: f32,
     /// Minimum width and height
-    min_size: Vector2<f32>,
+    pub min_size: Vector2<f32>,
     /// Maximum width and height
-    max_size: Vector2<f32>,
-    background: Brush,
-    foreground: Brush,
+    pub max_size: Vector2<f32>,
+    pub background: Brush,
+    pub foreground: Brush,
     /// Index of row to which this node belongs
-    row: usize,
+    pub row: usize,
     /// Index of column to which this node belongs
-    column: usize,
+    pub column: usize,
     /// Vertical alignment
-    vertical_alignment: VerticalAlignment,
+    pub vertical_alignment: VerticalAlignment,
     /// Horizontal alignment
-    horizontal_alignment: HorizontalAlignment,
+    pub horizontal_alignment: HorizontalAlignment,
     /// Margin (four sides)
-    margin: Thickness,
+    pub margin: Thickness,
     /// Current visibility state
-    visibility: bool,
-    global_visibility: bool,
-    children: Vec<Handle<UiNode>>,
-    parent: Handle<UiNode>,
+    pub visibility: bool,
+    pub global_visibility: bool,
+    pub children: Vec<Handle<UiNode>>,
+    pub parent: Handle<UiNode>,
     /// Indices of commands in command buffer emitted by the node.
-    pub(in crate) command_indices: RefCell<Vec<usize>>,
-    pub(in crate) is_mouse_directly_over: bool,
-    hit_test_visibility: bool,
-    z_index: usize,
-    allow_drag: bool,
-    allow_drop: bool,
+    pub command_indices: RefCell<Vec<usize>>,
+    pub is_mouse_directly_over: bool,
+    pub hit_test_visibility: bool,
+    pub z_index: usize,
+    pub allow_drag: bool,
+    pub allow_drop: bool,
     pub user_data: Option<Rc<dyn Any>>,
-    draw_on_top: bool,
-    enabled: bool,
-    cursor: Option<CursorIcon>,
-    opacity: Option<f32>,
-    tooltip: Handle<UiNode>,
-    tooltip_time: f32,
-    context_menu: Handle<UiNode>,
-    pub(in crate) clip_to_bounds: bool,
-    pub(in crate) layout_transform: Matrix3<f32>,
-    pub(in crate) render_transform: Matrix3<f32>,
-    pub(in crate) visual_transform: Matrix3<f32>,
-    pub(in crate) preview_messages: bool,
-    pub(in crate) handle_os_events: bool,
-    pub(in crate) layout_events_sender: Option<Sender<LayoutEvent>>,
+    pub draw_on_top: bool,
+    pub enabled: bool,
+    pub cursor: Option<CursorIcon>,
+    pub opacity: Option<f32>,
+    pub tooltip: Handle<UiNode>,
+    pub tooltip_time: f32,
+    pub context_menu: Handle<UiNode>,
+    pub clip_to_bounds: bool,
+    pub layout_transform: Matrix3<f32>,
+    pub render_transform: Matrix3<f32>,
+    pub visual_transform: Matrix3<f32>,
+    pub preview_messages: bool,
+    pub handle_os_events: bool,
+    pub layout_events_sender: Option<Sender<LayoutEvent>>,
 
     /// Layout. Interior mutability is a must here because layout performed in
     /// a series of recursive calls.
-    pub(in crate) measure_valid: Cell<bool>,
-    pub(in crate) arrange_valid: Cell<bool>,
-    pub(in crate) prev_measure: Cell<Vector2<f32>>,
-    pub(in crate) prev_arrange: Cell<Rect<f32>>,
+    pub measure_valid: Cell<bool>,
+    pub arrange_valid: Cell<bool>,
+    pub prev_measure: Cell<Vector2<f32>>,
+    pub prev_arrange: Cell<Rect<f32>>,
     /// Desired size of the node after Measure pass.
-    pub(in crate) desired_size: Cell<Vector2<f32>>,
+    pub desired_size: Cell<Vector2<f32>>,
     /// Actual local position of the widget after Arrange pass.
-    pub(in crate) actual_local_position: Cell<Vector2<f32>>,
+    pub actual_local_position: Cell<Vector2<f32>>,
     /// Actual local size of the widget after Arrange pass.
-    pub(in crate) actual_local_size: Cell<Vector2<f32>>,
-    pub(in crate) prev_global_visibility: bool,
-    pub(in crate) clip_bounds: Cell<Rect<f32>>,
+    pub actual_local_size: Cell<Vector2<f32>>,
+    pub prev_global_visibility: bool,
+    pub clip_bounds: Cell<Rect<f32>>,
 }
 
 impl Widget {
@@ -613,7 +613,7 @@ impl Widget {
     }
 
     #[inline]
-    pub(in crate) fn add_child(&mut self, child: Handle<UiNode>, in_front: bool) {
+    pub(crate) fn add_child(&mut self, child: Handle<UiNode>, in_front: bool) {
         self.invalidate_layout();
         if in_front && !self.children.is_empty() {
             self.children.insert(0, child)
@@ -628,13 +628,13 @@ impl Widget {
     }
 
     #[inline]
-    pub(in crate) fn clear_children(&mut self) {
+    pub(crate) fn clear_children(&mut self) {
         self.invalidate_layout();
         self.children.clear();
     }
 
     #[inline]
-    pub(in crate) fn remove_child(&mut self, child: Handle<UiNode>) {
+    pub(crate) fn remove_child(&mut self, child: Handle<UiNode>) {
         if let Some(i) = self.children.iter().position(|h| *h == child) {
             self.children.remove(i);
             self.invalidate_layout();
@@ -912,14 +912,14 @@ impl Widget {
     }
 
     #[inline]
-    pub(in crate) fn commit_arrange(&self, position: Vector2<f32>, size: Vector2<f32>) {
+    pub(crate) fn commit_arrange(&self, position: Vector2<f32>, size: Vector2<f32>) {
         self.actual_local_size.set(size);
         self.actual_local_position.set(position);
         self.arrange_valid.set(true);
     }
 
     #[inline]
-    pub(in crate) fn set_children(&mut self, children: Vec<Handle<UiNode>>) {
+    pub(crate) fn set_children(&mut self, children: Vec<Handle<UiNode>>) {
         self.invalidate_layout();
         self.request_update_visibility();
         self.children = children;
@@ -931,7 +931,7 @@ impl Widget {
     }
 
     #[inline]
-    pub(in crate) fn commit_measure(&self, desired_size: Vector2<f32>) {
+    pub(crate) fn commit_measure(&self, desired_size: Vector2<f32>) {
         self.desired_size.set(desired_size);
         self.measure_valid.set(true);
     }
@@ -952,7 +952,7 @@ impl Widget {
     }
 
     #[inline]
-    pub(in crate) fn set_global_visibility(&mut self, value: bool) {
+    pub(crate) fn set_global_visibility(&mut self, value: bool) {
         self.prev_global_visibility = self.global_visibility;
         self.global_visibility = value;
     }
