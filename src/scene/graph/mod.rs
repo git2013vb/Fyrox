@@ -29,8 +29,9 @@ use crate::{
         inspect::{Inspect, PropertyInfo},
         instant,
         math::Matrix4Ext,
-        pool::{Handle, Pool, Ticket},
+        pool::{Handle, MultiBorrowContext, Pool, Ticket},
         reflect::Reflect,
+        variable::try_inherit_properties,
         visitor::{Visit, VisitResult, Visitor},
     },
     resource::model::{Model, NodeMapping},
@@ -50,6 +51,7 @@ use crate::{
         sound::context::SoundContext,
         transform::TransformBuilder,
     },
+    script::ScriptTrait,
     utils::log::{Log, MessageKind},
 };
 use rapier3d::geometry::ColliderHandle;
@@ -176,12 +178,7 @@ pub struct SubGraph {
 fn remap_handles(old_new_mapping: &NodeHandleMap, dest_graph: &mut Graph) {
     // Iterate over instantiated nodes and remap handles.
     for (_, &new_node_handle) in old_new_mapping.inner().iter() {
-        let dest_node = &mut dest_graph.pool[new_node_handle];
-        dest_node.remap_handles(old_new_mapping);
-
-        if let Some(script) = dest_node.script.as_mut() {
-            script.remap_handles(old_new_mapping);
-        }
+        old_new_mapping.remap_handles(&mut dest_graph.pool[new_node_handle]);
     }
 
     dest_graph.sound_context.remap_handles(old_new_mapping);
@@ -211,10 +208,17 @@ impl Graph {
     /// Creates new graph instance with single root node.
     pub fn new() -> Self {
         let (tx, rx) = channel();
+
+        // Create root node.
+        let mut root_node = Pivot::default();
+        root_node.script_message_sender = Some(tx.clone());
+        root_node.set_name("__ROOT__");
+
+        // Add it to the pool.
         let mut pool = Pool::new();
-        let mut root = Node::new(Pivot::default());
-        root.set_name("__ROOT__");
-        let root = pool.spawn(root);
+        let root = pool.spawn(Node::new(root_node));
+        pool[root].self_handle = root;
+
         Self {
             physics: Default::default(),
             stack: Vec::new(),
@@ -236,6 +240,7 @@ impl Graph {
     pub fn add_node(&mut self, mut node: Node) -> Handle<Node> {
         let children = node.children.clone();
         node.children.clear();
+        let has_script = node.script.is_some();
         let handle = self.pool.spawn(node);
         if self.root.is_some() {
             self.link_nodes(handle, self.root);
@@ -245,6 +250,11 @@ impl Graph {
         }
 
         self.event_broadcaster.broadcast(GraphEvent::Added(handle));
+        if has_script {
+            self.script_message_sender
+                .send(ScriptMessage::InitializeScript { handle })
+                .unwrap();
+        }
 
         let sender = self.script_message_sender.clone();
         let node = &mut self[handle];
@@ -293,6 +303,14 @@ impl Graph {
         self.pool.try_borrow_mut(handle)
     }
 
+    /// Begins multi-borrow that allows you to as many (`N`) **unique** references to the graph
+    /// nodes as you need. See [`MultiBorrowContext::try_get`] for more info.
+    pub fn begin_multi_borrow<const N: usize>(
+        &mut self,
+    ) -> MultiBorrowContext<N, Node, NodeContainer> {
+        self.pool.begin_multi_borrow()
+    }
+
     /// Destroys node and its children recursively.
     ///
     /// # Notes
@@ -313,15 +331,11 @@ impl Graph {
 
             // Remove associated entities.
             let mut node = self.pool.free(handle);
-            self.clean_up_for_node(&mut node);
+            node.clean_up(self);
 
             self.event_broadcaster
                 .broadcast(GraphEvent::Removed(handle));
         }
-    }
-
-    fn clean_up_for_node(&mut self, node: &mut Node) {
-        node.clean_up(self);
     }
 
     fn unlink_internal(&mut self, node_handle: Handle<Node>) {
@@ -423,6 +437,17 @@ impl Graph {
     /// is returned.
     pub fn find_by_name_from_root(&self, name: &str) -> Handle<Node> {
         self.find_by_name(self.root, name)
+    }
+
+    /// Searches for a **first** node with a script of given type `S` in the hierarchy starting
+    /// from given `root_node`.
+    pub fn find_first_by_script<S>(&self, root_node: Handle<Node>) -> Handle<Node>
+    where
+        S: ScriptTrait,
+    {
+        self.find(root_node, &mut |n| {
+            n.script().and_then(|s| s.cast::<S>()).is_some()
+        })
     }
 
     /// Searches node using specified compare closure starting from root. If nothing was found,
@@ -583,9 +608,9 @@ impl Graph {
         dest_copy_handle
     }
 
-    fn restore_original_handles(&mut self) {
+    fn restore_original_handles_and_inherit_properties(&mut self) {
         // Iterate over each node in the graph and resolve original handles. Original handle is a handle
-        // to a node in resource from which a node was instantiated from. Also sync templated properties
+        // to a node in resource from which a node was instantiated from. Also sync inheritable properties
         // if needed and copy surfaces from originals.
         for node in self.pool.iter_mut() {
             if let Some(model) = node.resource() {
@@ -625,7 +650,10 @@ impl Graph {
                             node.original_handle_in_resource = original;
                             node.inv_bind_pose_transform = resource_node.inv_bind_pose_transform();
 
-                            Log::verify(node.inherit(resource_node));
+                            Log::verify(try_inherit_properties(
+                                node.as_reflect_mut(),
+                                resource_node.as_reflect(),
+                            ));
                         } else {
                             Log::warn(format!(
                                 "Unable to find original handle for node {}",
@@ -644,6 +672,12 @@ impl Graph {
         Log::writeln(MessageKind::Information, "Original handles resolved!");
     }
 
+    // Maps handles in properties of instances after property inheritance. It is needed, because when a
+    // property contains node handle, the handle cannot be used directly after inheritance. Instead, it
+    // must be mapped to respective instance first.
+    //
+    // To do so, we at first, build node handle mapping (original handle -> instance handle) starting from
+    // instance root. Then we must find all inheritable properties and try to remap them to instance handles.
     fn remap_handles(&mut self, instances: &[(Handle<Node>, Model)]) {
         for (instance_root, resource) in instances {
             // Prepare old -> new handle mapping first by walking over the graph
@@ -675,7 +709,7 @@ impl Graph {
             // Lastly, remap handles. We can't do this in single pass because there could
             // be cross references.
             for (_, handle) in old_new_mapping.map.iter() {
-                self.pool[*handle].remap_handles(&old_new_mapping);
+                old_new_mapping.remap_inheritable_handles(&mut self.pool[*handle]);
             }
         }
     }
@@ -800,7 +834,7 @@ impl Graph {
 
         self.restore_dynamic_node_data();
         self.update_hierarchical_data();
-        self.restore_original_handles();
+        self.restore_original_handles_and_inherit_properties();
         let instances = self.restore_integrity();
         self.remap_handles(&instances);
 
@@ -899,11 +933,11 @@ impl Graph {
         self.performance_statistics.sync_time = instant::Instant::now() - last_time;
 
         self.physics.performance_statistics.reset();
-        self.physics.update();
+        self.physics.update(dt);
         self.performance_statistics.physics = self.physics.performance_statistics.clone();
 
         self.physics2d.performance_statistics.reset();
-        self.physics2d.update();
+        self.physics2d.update(dt);
         self.performance_statistics.physics2d = self.physics2d.performance_statistics.clone();
 
         self.sound_context.update(&self.pool);
@@ -1018,7 +1052,9 @@ impl Graph {
     }
 
     pub(crate) fn take_reserve_internal(&mut self, handle: Handle<Node>) -> (Ticket<Node>, Node) {
-        self.pool.take_reserve(handle)
+        let (ticket, mut node) = self.pool.take_reserve(handle);
+        node.clean_up(self);
+        (ticket, node)
     }
 
     /// Puts node back by given ticket. Attaches back to root node of graph.
@@ -1033,9 +1069,8 @@ impl Graph {
     }
 
     /// Makes node handle vacant again.
-    pub fn forget_ticket(&mut self, ticket: Ticket<Node>, mut node: Node) -> Node {
+    pub fn forget_ticket(&mut self, ticket: Ticket<Node>, node: Node) -> Node {
         self.pool.forget_ticket(ticket);
-        self.clean_up_for_node(&mut node);
         node
     }
 
@@ -1049,7 +1084,7 @@ impl Graph {
         let mut stack = self[root].children().to_vec();
         while let Some(handle) = stack.pop() {
             stack.extend_from_slice(self[handle].children());
-            descendants.push(self.pool.take_reserve(handle));
+            descendants.push(self.take_reserve_internal(handle));
         }
 
         SubGraph {
@@ -1077,13 +1112,11 @@ impl Graph {
 
     /// Forgets the entire sub-graph making handles to nodes invalid.
     pub fn forget_sub_graph(&mut self, sub_graph: SubGraph) {
-        for (ticket, mut node) in sub_graph.descendants {
+        for (ticket, _) in sub_graph.descendants {
             self.pool.forget_ticket(ticket);
-            self.clean_up_for_node(&mut node);
         }
-        let (ticket, mut root) = sub_graph.root;
+        let (ticket, _) = sub_graph.root;
         self.pool.forget_ticket(ticket);
-        self.clean_up_for_node(&mut root);
     }
 
     /// Returns the number of nodes in the graph.

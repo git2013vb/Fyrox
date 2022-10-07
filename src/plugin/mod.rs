@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 
 use crate::{
-    core::{pool::Handle, uuid::Uuid},
+    core::pool::Handle,
     engine::{resource_manager::ResourceManager, SerializationContext},
     event::Event,
     event_loop::ControlFlow,
@@ -69,7 +69,7 @@ impl<'a> SoundEngineHelper<'a> {
 }
 
 /// Contains plugin environment.
-pub struct PluginContext<'a> {
+pub struct PluginContext<'a, 'b> {
     /// A reference to scene container of the engine. You can add new scenes from [`Plugin`] methods
     /// by using [`SceneContainer::add`].
     pub scenes: &'a mut SceneContainer,
@@ -86,8 +86,15 @@ pub struct PluginContext<'a> {
     pub renderer: &'a mut Renderer,
 
     /// The time (in seconds) that passed since last call of a method in which the context was
-    /// passed.
+    /// passed. It has fixed value that is defined by a caller (in most cases it is `Executor`).
     pub dt: f32,
+
+    /// A reference to time accumulator, that holds remaining amount of time that should be used
+    /// to update a plugin. A caller splits `lag` into multiple sub-steps using `dt` and thus
+    /// stabilizes update rate. The main use of this variable, is to be able to reset `lag` when
+    /// you doing some heavy calculations in a your game loop (i.e. loading a new level) so the
+    /// engine won't try to "catch up" with all the time that was spent in heavy calculation.
+    pub lag: &'b mut f32,
 
     /// A reference to serialization context of the engine. See [`SerializationContext`] for more
     /// info.
@@ -154,7 +161,7 @@ impl dyn Plugin {
 ///
 /// ```rust
 /// use fyrox::{
-///     core::{pool::Handle, uuid::{uuid,Uuid}},
+///     core::{pool::Handle},
 ///     plugin::{Plugin, PluginContext, PluginRegistrationContext},
 ///     scene::Scene,
 ///     event::Event
@@ -176,12 +183,6 @@ impl dyn Plugin {
 ///         // The implementation is optional.
 ///     }
 ///
-///     fn id(&self) -> Uuid {
-///         // The method must return persistent type id.
-///         // Use https://www.uuidgenerator.net/ to generate one.
-///         uuid!("b9302812-81a7-48a5-89d2-921774d94943")
-///     }
-///
 ///     fn on_os_event(&mut self, event: &Event<()>, context: PluginContext, control_flow: &mut ControlFlow) {
 ///         // The method is called when the main window receives an event from the OS.
 ///     }
@@ -200,20 +201,6 @@ pub trait Plugin: BasePlugin {
         #[allow(unused_variables)] control_flow: &mut ControlFlow,
     ) {
     }
-
-    /// The method must return persistent type id. It is used to link scripts and plugins, it is
-    /// possible to have multiple plugins and each script instance must be able to find correct
-    /// plugin, it is done by comparing UUIDs.
-    ///
-    /// # Important notes
-    ///
-    /// Do **not** use [`Uuid::new_v4`] or any other [`Uuid`] methods that generates ids, id must
-    /// be persistent until application running.
-    ///
-    /// # How to obtain UUID
-    ///
-    /// Use <https://www.uuidgenerator.net/> to generate one.
-    fn id(&self) -> Uuid;
 
     /// The method is called when the main window receives an event from the OS. The main use of
     /// the method is to respond to some external events, for example an event from keyboard or

@@ -13,7 +13,7 @@ use crate::{
     scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
     stack_panel::StackPanelBuilder,
     text::TextBuilder,
-    text_box::{TextBoxBuilder, TextBoxMessage, TextCommitMode},
+    text_box::{TextBoxBuilder, TextCommitMode},
     tree::{Tree, TreeBuilder, TreeMessage, TreeRoot, TreeRootBuilder, TreeRootMessage},
     widget::{Widget, WidgetBuilder},
     window::{Window, WindowBuilder, WindowMessage, WindowTitle},
@@ -36,6 +36,7 @@ use std::{
     thread,
 };
 
+use crate::text::TextMessage;
 use notify::Watcher;
 #[cfg(not(target_arch = "wasm32"))]
 use sysinfo::{DiskExt, RefreshKind, SystemExt};
@@ -116,7 +117,7 @@ pub struct FileBrowser {
     pub mode: FileBrowserMode,
     pub file_name: Handle<UiNode>,
     pub file_name_value: PathBuf,
-    pub fs_receiver: Rc<Receiver<notify::DebouncedEvent>>,
+    pub fs_receiver: Rc<Receiver<notify::Event>>,
     #[allow(clippy::type_complexity)]
     pub watcher: Rc<cell::Cell<Option<(notify::RecommendedWatcher, thread::JoinHandle<()>)>>>,
 }
@@ -155,7 +156,7 @@ impl FileBrowser {
             ));
         } else {
             // Clear text field if path is invalid.
-            ui.send_message(TextBoxMessage::text(
+            ui.send_message(TextMessage::text(
                 self.path_text,
                 MessageDirection::ToWidget,
                 String::new(),
@@ -213,7 +214,7 @@ impl Control for FileBrowser {
                             self.path = path.clone();
 
                             // Set value of text field.
-                            ui.send_message(TextBoxMessage::text(
+                            ui.send_message(TextMessage::text(
                                 self.path_text,
                                 MessageDirection::ToWidget,
                                 path.to_string_lossy().to_string(),
@@ -248,14 +249,14 @@ impl Control for FileBrowser {
                                         None => self.path.clone(),
                                     };
                                     if current_root.exists() {
-                                        let _ = watcher.unwatch(current_root);
+                                        let _ = watcher.unwatch(&current_root);
                                     }
                                     let new_root = match &root {
                                         Some(path) => path.clone(),
                                         None => self.path.clone(),
                                     };
                                     let _ =
-                                        watcher.watch(new_root, notify::RecursiveMode::Recursive);
+                                        watcher.watch(&new_root, notify::RecursiveMode::Recursive);
                                     Some((watcher, converter))
                                 }
                                 None => None,
@@ -321,7 +322,7 @@ impl Control for FileBrowser {
                     FileBrowserMessage::Rescan => (),
                 }
             }
-        } else if let Some(TextBoxMessage::Text(txt)) = message.data::<TextBoxMessage>() {
+        } else if let Some(TextMessage::Text(txt)) = message.data::<TextMessage>() {
             if message.direction() == MessageDirection::FromWidget {
                 if message.destination() == self.path_text {
                     self.path = txt.into();
@@ -384,7 +385,7 @@ impl Control for FileBrowser {
 
                     if let FileBrowserMode::Save { .. } = self.mode {
                         if path.is_file() {
-                            ui.send_message(TextBoxMessage::text(
+                            ui.send_message(TextMessage::text(
                                 self.file_name,
                                 MessageDirection::ToWidget,
                                 path.file_name()
@@ -399,7 +400,7 @@ impl Control for FileBrowser {
                     if self.path != path {
                         self.path = path.clone();
 
-                        ui.send_message(TextBoxMessage::text(
+                        ui.send_message(TextMessage::text(
                             self.path_text,
                             MessageDirection::ToWidget,
                             path.to_string_lossy().to_string(),
@@ -419,32 +420,31 @@ impl Control for FileBrowser {
 
     fn update(&mut self, _dt: f32, sender: &Sender<UiMessage>) {
         if let Ok(event) = self.fs_receiver.try_recv() {
-            match event {
-                notify::DebouncedEvent::Remove(path) => {
-                    let _ = sender.send(FileBrowserMessage::remove(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                        path,
-                    ));
+            if event.need_rescan() {
+                let _ = sender.send(FileBrowserMessage::rescan(
+                    self.handle,
+                    MessageDirection::ToWidget,
+                ));
+            } else {
+                for path in event.paths.iter() {
+                    match event.kind {
+                        notify::EventKind::Remove(_) => {
+                            let _ = sender.send(FileBrowserMessage::remove(
+                                self.handle,
+                                MessageDirection::ToWidget,
+                                path.clone(),
+                            ));
+                        }
+                        notify::EventKind::Create(_) => {
+                            let _ = sender.send(FileBrowserMessage::add(
+                                self.handle,
+                                MessageDirection::ToWidget,
+                                path.clone(),
+                            ));
+                        }
+                        _ => (),
+                    }
                 }
-                notify::DebouncedEvent::Create(path) => {
-                    let _ = sender.send(FileBrowserMessage::add(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                        path,
-                    ));
-                }
-                notify::DebouncedEvent::Rescan | notify::DebouncedEvent::Error(_, _) => {
-                    let _ = sender.send(FileBrowserMessage::rescan(
-                        self.handle,
-                        MessageDirection::ToWidget,
-                    ));
-                }
-                notify::DebouncedEvent::NoticeRemove(_) => (),
-                notify::DebouncedEvent::NoticeWrite(_) => (),
-                notify::DebouncedEvent::Write(_) => (),
-                notify::DebouncedEvent::Chmod(_) => (),
-                notify::DebouncedEvent::Rename(_, _) => (),
             }
         }
     }
@@ -941,24 +941,29 @@ impl FileBrowserBuilder {
 }
 
 fn setup_filebrowser_fs_watcher(
-    fs_sender: mpsc::Sender<notify::DebouncedEvent>,
+    fs_sender: mpsc::Sender<notify::Event>,
     the_path: PathBuf,
 ) -> Option<(notify::RecommendedWatcher, thread::JoinHandle<()>)> {
     let (tx, rx) = mpsc::channel();
-    match notify::watcher(tx, time::Duration::from_secs(1)) {
+    match notify::RecommendedWatcher::new(
+        tx,
+        notify::Config::default().with_poll_interval(time::Duration::from_secs(1)),
+    ) {
         Ok(mut watcher) => {
             #[allow(clippy::while_let_loop)]
             let watcher_conversion_thread = std::thread::spawn(move || loop {
                 match rx.recv() {
                     Ok(event) => {
-                        let _ = fs_sender.send(event);
+                        if let Ok(event) = event {
+                            let _ = fs_sender.send(event);
+                        }
                     }
                     Err(_) => {
                         break;
                     }
                 };
             });
-            let _ = watcher.watch(the_path, notify::RecursiveMode::Recursive);
+            let _ = watcher.watch(&the_path, notify::RecursiveMode::Recursive);
             Some((watcher, watcher_conversion_thread))
         }
         Err(_) => None,

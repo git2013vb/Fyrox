@@ -41,7 +41,7 @@ use crate::{
     command::{panel::CommandStackViewer, Command, CommandStack},
     configurator::Configurator,
     curve_editor::CurveEditorWindow,
-    inspector::Inspector,
+    inspector::{editors::handle::HandlePropertyEditorMessage, Inspector},
     interaction::{
         move_mode::MoveInteractionMode,
         navmesh::{EditNavmeshMode, NavmeshPanel},
@@ -64,11 +64,10 @@ use crate::{
         is_scene_needs_to_be_saved, EditorScene, Selection,
     },
     scene_viewer::SceneViewer,
-    settings::Settings,
+    settings::{camera::SceneCameraSettings, Settings},
     utils::path_fixer::PathFixer,
     world::{graph::selection::GraphSelection, WorldViewer},
 };
-use fyrox::core::visitor::Visitor;
 use fyrox::{
     core::{
         algebra::{Matrix3, Vector2},
@@ -78,6 +77,7 @@ use fyrox::{
         pool::{ErasedHandle, Handle},
         scope_profile,
         sstorage::ImmutableString,
+        visitor::Visitor,
     },
     dpi::LogicalSize,
     engine::{resource_manager::ResourceManager, Engine, EngineInitParams, SerializationContext},
@@ -104,7 +104,7 @@ use fyrox::{
     scene::{
         camera::{Camera, Projection},
         mesh::Mesh,
-        node::{Node, TypeUuidProvider},
+        node::Node,
         Scene, SceneLoader,
     },
     utils::{
@@ -233,6 +233,10 @@ pub enum Message {
     OpenSaveSceneConfirmationDialog(SaveSceneConfirmationDialogAction),
     SetBuildProfile(BuildProfile),
     SaveSelectionAsPrefab(PathBuf),
+    SyncNodeHandleName {
+        view: Handle<UiNode>,
+        handle: Handle<Node>,
+    },
 }
 
 impl Message {
@@ -284,7 +288,7 @@ impl Mode {
 
 pub struct GameLoopData {
     clock: Instant,
-    elapsed_time: f32,
+    lag: f32,
 }
 
 pub struct StartupData {
@@ -566,7 +570,7 @@ impl Editor {
 
         let ctx = &mut engine.user_interface.build_ctx();
         let navmesh_panel = NavmeshPanel::new(ctx, message_sender.clone());
-        let world_outliner = WorldViewer::new(ctx, message_sender.clone());
+        let world_outliner = WorldViewer::new(ctx, message_sender.clone(), &settings);
         let command_stack_viewer = CommandStackViewer::new(ctx, message_sender.clone());
         let log = LogPanel::new(ctx, log_message_receiver);
         let inspector = Inspector::new(ctx, message_sender.clone());
@@ -747,7 +751,7 @@ impl Editor {
             mode: Mode::Edit,
             game_loop_data: GameLoopData {
                 clock: Instant::now(),
-                elapsed_time: 0.0,
+                lag: 0.0,
             },
             absm_editor,
             build_window,
@@ -795,27 +799,31 @@ impl Editor {
                 self.settings = settings;
 
                 Log::info("Editor settings were reloaded successfully!");
+            }
+            Err(e) => {
+                self.settings = Default::default();
 
-                self.menu
-                    .file_menu
-                    .update_recent_files_list(&mut self.engine.user_interface, &self.settings);
+                Log::info(format!(
+                    "Failed to load settings, fallback to default. Reason: {:?}",
+                    e
+                ))
+            }
+        }
 
-                match self
-                    .engine
-                    .renderer
-                    .set_quality_settings(&self.settings.graphics.quality)
-                {
-                    Ok(_) => {
-                        Log::info("Graphics settings were applied successfully!");
-                    }
-                    Err(e) => Log::info(format!(
-                        "Failed to apply graphics settings! Reason: {:?}",
-                        e
-                    )),
-                }
+        self.menu
+            .file_menu
+            .update_recent_files_list(&mut self.engine.user_interface, &self.settings);
+
+        match self
+            .engine
+            .renderer
+            .set_quality_settings(&self.settings.graphics.quality)
+        {
+            Ok(_) => {
+                Log::info("Graphics settings were applied successfully!");
             }
             Err(e) => Log::info(format!(
-                "Failed to load settings, fallback to default. Reason: {:?}",
+                "Failed to apply graphics settings! Reason: {:?}",
                 e
             )),
         }
@@ -839,7 +847,8 @@ impl Editor {
         self.scene_viewer
             .set_render_target(&self.engine.user_interface, scene.render_target.clone());
 
-        let editor_scene = EditorScene::from_native_scene(scene, &mut self.engine, path.clone());
+        let editor_scene =
+            EditorScene::from_native_scene(scene, &mut self.engine, path.clone(), &self.settings);
 
         self.interaction_modes = vec![
             Box::new(SelectInteractionMode::new(
@@ -1007,7 +1016,9 @@ impl Editor {
                     if let Some(editor_scene) = self.scene.as_mut() {
                         if !editor_scene.clipboard.is_empty() {
                             sender
-                                .send(Message::do_scene_command(PasteCommand::new()))
+                                .send(Message::do_scene_command(PasteCommand::new(
+                                    engine.scenes[editor_scene.scene].graph.get_root(),
+                                )))
                                 .unwrap();
                         }
                     }
@@ -1131,7 +1142,7 @@ impl Editor {
             }
 
             self.world_viewer
-                .handle_ui_message(message, editor_scene, engine);
+                .handle_ui_message(message, editor_scene, engine, &mut self.settings);
 
             self.light_panel
                 .handle_ui_message(message, editor_scene, engine);
@@ -1333,7 +1344,8 @@ impl Editor {
 
     fn post_update(&mut self) {
         if let Some(scene) = self.scene.as_mut() {
-            self.world_viewer.post_update(scene, &mut self.engine);
+            self.world_viewer
+                .post_update(scene, &mut self.engine, &self.settings);
         }
     }
 
@@ -1556,6 +1568,9 @@ impl Editor {
         self.asset_browser
             .set_working_directory(engine, &working_directory);
 
+        self.world_viewer
+            .on_configure(&engine.user_interface, &self.settings);
+
         Log::info(format!(
             "New working directory was successfully set: {:?}",
             working_directory
@@ -1565,9 +1580,16 @@ impl Editor {
     fn select_object(&mut self, type_id: TypeId, handle: ErasedHandle) {
         if let Some(scene) = self.scene.as_ref() {
             let new_selection = if type_id == TypeId::of::<Node>() {
-                Some(Selection::Graph(GraphSelection::single_or_empty(
-                    handle.into(),
-                )))
+                if self.engine.scenes[scene.scene]
+                    .graph
+                    .is_valid_handle(handle.into())
+                {
+                    Some(Selection::Graph(GraphSelection::single_or_empty(
+                        handle.into(),
+                    )))
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -1594,12 +1616,17 @@ impl Editor {
         ));
     }
 
-    fn poll_ui_messages(&mut self) {
+    fn poll_ui_messages(&mut self) -> usize {
         scope_profile!();
+
+        let mut processed = 0;
 
         while let Some(mut ui_message) = self.engine.user_interface.poll_message() {
             self.handle_ui_message(&mut ui_message);
+            processed += 1;
         }
+
+        processed
     }
 
     fn update(&mut self, dt: f32) {
@@ -1653,125 +1680,153 @@ impl Editor {
 
         self.absm_editor.update(&mut self.engine);
         self.log.update(&mut self.engine);
+        self.material_editor.update(&mut self.engine);
+        self.asset_browser.update(&mut self.engine);
 
-        let mut needs_sync = false;
+        let mut iterations = 1;
+        while iterations > 0 {
+            iterations -= 1;
 
-        while let Ok(message) = self.message_receiver.try_recv() {
-            self.path_fixer
-                .handle_message(&message, &self.engine.user_interface);
+            let ui_messages_processed_count = self.poll_ui_messages();
 
-            self.save_scene_dialog
-                .handle_message(&message, &self.message_sender);
+            let mut needs_sync = false;
 
-            if let Some(editor_scene) = self.scene.as_ref() {
-                self.inspector
-                    .handle_message(&message, editor_scene, &mut self.engine);
-            }
+            let mut editor_messages_processed_count = 0;
+            while let Ok(message) = self.message_receiver.try_recv() {
+                editor_messages_processed_count += 1;
+                self.path_fixer
+                    .handle_message(&message, &self.engine.user_interface);
 
-            self.scene_viewer.handle_message(&message, &mut self.engine);
+                self.save_scene_dialog
+                    .handle_message(&message, &self.message_sender);
 
-            match message {
-                Message::DoSceneCommand(command) => {
-                    needs_sync |= self.do_scene_command(command);
+                if let Some(editor_scene) = self.scene.as_ref() {
+                    self.inspector
+                        .handle_message(&message, editor_scene, &mut self.engine);
                 }
-                Message::UndoSceneCommand => {
-                    needs_sync |= self.undo_scene_command();
-                }
-                Message::RedoSceneCommand => {
-                    needs_sync |= self.redo_scene_command();
-                }
-                Message::ClearSceneCommandStack => {
-                    needs_sync |= self.clear_scene_command_stack();
-                }
-                Message::SelectionChanged => {
-                    self.world_viewer.sync_selection = true;
-                }
-                Message::SaveScene(path) => self.save_current_scene(path),
-                Message::LoadScene(scene_path) => {
-                    self.load_scene(scene_path);
-                    needs_sync = true;
-                }
-                Message::SetInteractionMode(mode_kind) => {
-                    self.set_interaction_mode(Some(mode_kind))
-                }
-                Message::Exit { force } => self.exit(force),
-                Message::CloseScene => {
-                    needs_sync |= self.close_current_scene();
-                }
-                Message::NewScene => {
-                    self.create_new_scene();
-                    needs_sync = true;
-                }
-                Message::Configure { working_directory } => {
-                    self.configure(working_directory);
-                    needs_sync = true;
-                }
-                Message::OpenSettings => {
-                    self.menu.file_menu.settings.open(
-                        &mut self.engine.user_interface,
-                        &self.settings,
-                        &self.message_sender,
-                    );
-                }
-                Message::OpenMaterialEditor(material) => self.open_material_editor(material),
-                Message::ShowInAssetBrowser(path) => {
-                    self.asset_browser
-                        .locate_path(&self.engine.user_interface, path);
-                }
-                Message::SetWorldViewerFilter(filter) => {
-                    self.world_viewer
-                        .set_filter(filter, &self.engine.user_interface);
-                }
-                Message::LocateObject { type_id, handle } => {
-                    self.world_viewer
-                        .try_locate_object(type_id, handle, &self.engine)
-                }
-                Message::SelectObject { type_id, handle } => {
-                    self.select_object(type_id, handle);
-                }
-                Message::SetEditorCameraProjection(projection) => {
-                    if let Some(editor_scene) = self.scene.as_ref() {
-                        editor_scene.camera_controller.set_projection(
-                            &mut self.engine.scenes[editor_scene.scene].graph,
-                            projection,
+
+                self.scene_viewer.handle_message(&message, &mut self.engine);
+
+                match message {
+                    Message::DoSceneCommand(command) => {
+                        needs_sync |= self.do_scene_command(command);
+                    }
+                    Message::UndoSceneCommand => {
+                        needs_sync |= self.undo_scene_command();
+                    }
+                    Message::RedoSceneCommand => {
+                        needs_sync |= self.redo_scene_command();
+                    }
+                    Message::ClearSceneCommandStack => {
+                        needs_sync |= self.clear_scene_command_stack();
+                    }
+                    Message::SelectionChanged => {
+                        self.world_viewer.sync_selection = true;
+                    }
+                    Message::SaveScene(path) => self.save_current_scene(path),
+                    Message::LoadScene(scene_path) => {
+                        self.load_scene(scene_path);
+                        needs_sync = true;
+                    }
+                    Message::SetInteractionMode(mode_kind) => {
+                        self.set_interaction_mode(Some(mode_kind))
+                    }
+                    Message::Exit { force } => self.exit(force),
+                    Message::CloseScene => {
+                        needs_sync |= self.close_current_scene();
+                    }
+                    Message::NewScene => {
+                        self.create_new_scene();
+                        needs_sync = true;
+                    }
+                    Message::Configure { working_directory } => {
+                        self.configure(working_directory);
+                        needs_sync = true;
+                    }
+                    Message::OpenSettings => {
+                        self.menu.file_menu.settings.open(
+                            &mut self.engine.user_interface,
+                            &self.settings,
+                            &self.message_sender,
                         );
                     }
-                }
-                Message::SwitchMode => match self.mode {
-                    Mode::Edit => self.set_build_mode(),
-                    _ => self.set_editor_mode(),
-                },
-                Message::SwitchToPlayMode => self.set_play_mode(),
-                Message::SwitchToEditMode => self.set_editor_mode(),
-                Message::OpenLoadSceneDialog => {
-                    self.menu
-                        .open_load_file_selector(&mut self.engine.user_interface);
-                }
-                Message::OpenSaveSceneDialog => {
-                    self.menu
-                        .open_save_file_selector(&mut self.engine.user_interface);
-                }
-                Message::OpenSaveSceneConfirmationDialog(action) => {
-                    self.save_scene_dialog
-                        .open(&self.engine.user_interface, action);
-                }
-                Message::SetBuildProfile(profile) => {
-                    self.build_profile = profile;
-                }
-                Message::SaveSelectionAsPrefab(path) => {
-                    self.try_save_selection_as_prefab(path);
+                    Message::OpenMaterialEditor(material) => self.open_material_editor(material),
+                    Message::ShowInAssetBrowser(path) => {
+                        self.asset_browser
+                            .locate_path(&self.engine.user_interface, path);
+                    }
+                    Message::SetWorldViewerFilter(filter) => {
+                        self.world_viewer
+                            .set_filter(filter, &self.engine.user_interface);
+                    }
+                    Message::LocateObject { type_id, handle } => self
+                        .world_viewer
+                        .try_locate_object(type_id, handle, &self.engine),
+                    Message::SelectObject { type_id, handle } => {
+                        self.select_object(type_id, handle);
+                    }
+                    Message::SetEditorCameraProjection(projection) => {
+                        if let Some(editor_scene) = self.scene.as_ref() {
+                            editor_scene.camera_controller.set_projection(
+                                &mut self.engine.scenes[editor_scene.scene].graph,
+                                projection,
+                            );
+                        }
+                    }
+                    Message::SwitchMode => match self.mode {
+                        Mode::Edit => self.set_build_mode(),
+                        _ => self.set_editor_mode(),
+                    },
+                    Message::SwitchToPlayMode => self.set_play_mode(),
+                    Message::SwitchToEditMode => self.set_editor_mode(),
+                    Message::OpenLoadSceneDialog => {
+                        self.menu
+                            .open_load_file_selector(&mut self.engine.user_interface);
+                    }
+                    Message::OpenSaveSceneDialog => {
+                        self.menu
+                            .open_save_file_selector(&mut self.engine.user_interface);
+                    }
+                    Message::OpenSaveSceneConfirmationDialog(action) => {
+                        self.save_scene_dialog
+                            .open(&self.engine.user_interface, action);
+                    }
+                    Message::SetBuildProfile(profile) => {
+                        self.build_profile = profile;
+                    }
+                    Message::SaveSelectionAsPrefab(path) => {
+                        self.try_save_selection_as_prefab(path);
+                    }
+                    Message::SyncNodeHandleName { view, handle } => {
+                        if let Some(editor_scene) = self.scene.as_ref() {
+                            let scene = &self.engine.scenes[editor_scene.scene];
+                            self.engine.user_interface.send_message(
+                                HandlePropertyEditorMessage::name(
+                                    view,
+                                    MessageDirection::ToWidget,
+                                    scene.graph.try_get(handle).map(|n| n.name_owned()),
+                                ),
+                            );
+                        }
+                    }
                 }
             }
-        }
 
-        if needs_sync {
-            self.sync_to_model();
+            if needs_sync {
+                self.sync_to_model();
+            }
+
+            // Any processed UI message can produce editor messages and vice versa, in this case we
+            // must do another pass.
+            if ui_messages_processed_count > 0 || editor_messages_processed_count > 0 {
+                iterations += 1;
+            }
         }
 
         self.handle_resize();
 
         if let Some(editor_scene) = self.scene.as_mut() {
-            editor_scene.draw_debug(&mut self.engine, &self.settings.debugging);
+            editor_scene.draw_auxiliary_geometry(&mut self.engine, &self.settings);
 
             let scene = &mut self.engine.scenes[editor_scene.scene];
 
@@ -1790,17 +1845,34 @@ impl Editor {
                 .camera_controller
                 .update(graph, &self.settings.camera, dt);
 
+            // Save camera current camera settings for current scene to be able to load them
+            // on next launch.
+            if let Some(path) = editor_scene.path.as_ref() {
+                let last_settings = SceneCameraSettings {
+                    position: editor_scene.camera_controller.position(&scene.graph),
+                    yaw: editor_scene.camera_controller.yaw,
+                    pitch: editor_scene.camera_controller.pitch,
+                };
+
+                if let Some(entry) = self.settings.camera.camera_settings.get_mut(path) {
+                    *entry = last_settings;
+                } else {
+                    self.settings
+                        .camera
+                        .camera_settings
+                        .insert(path.clone(), last_settings);
+                }
+            }
+
             if let Some(mode) = self.current_interaction_mode {
                 self.interaction_modes[mode as usize].update(
                     editor_scene,
                     editor_scene.camera_controller.camera,
                     &mut self.engine,
+                    &self.settings,
                 );
             }
         }
-
-        self.material_editor.update(&mut self.engine);
-        self.asset_browser.update(&mut self.engine);
     }
 
     fn try_save_selection_as_prefab(&self, path: PathBuf) {
@@ -1846,7 +1918,7 @@ impl Editor {
 
     pub fn add_game_plugin<P>(&mut self, plugin: P)
     where
-        P: PluginConstructor + TypeUuidProvider + 'static,
+        P: PluginConstructor + 'static,
     {
         self.engine.add_plugin_constructor(plugin)
     }
@@ -1945,6 +2017,9 @@ impl Editor {
                     self.engine.user_interface.process_os_event(&os_event);
                 }
             }
+            Event::LoopDestroyed => {
+                Log::verify(self.settings.save());
+            }
             _ => *control_flow = ControlFlow::Poll,
         });
     }
@@ -1962,23 +2037,24 @@ fn set_ui_scaling(ui: &UserInterface, scale: f32) {
 fn update(editor: &mut Editor, control_flow: &mut ControlFlow) {
     scope_profile!();
 
-    let mut dt =
-        editor.game_loop_data.clock.elapsed().as_secs_f32() - editor.game_loop_data.elapsed_time;
-    while dt >= FIXED_TIMESTEP {
-        dt -= FIXED_TIMESTEP;
-        editor.game_loop_data.elapsed_time += FIXED_TIMESTEP;
+    let elapsed = editor.game_loop_data.clock.elapsed().as_secs_f32();
+    editor.game_loop_data.clock = Instant::now();
+    editor.game_loop_data.lag += elapsed;
 
-        editor.engine.pre_update(FIXED_TIMESTEP, control_flow);
+    while editor.game_loop_data.lag >= FIXED_TIMESTEP {
+        editor.game_loop_data.lag -= FIXED_TIMESTEP;
+
+        editor
+            .engine
+            .pre_update(FIXED_TIMESTEP, control_flow, &mut editor.game_loop_data.lag);
 
         editor.update(FIXED_TIMESTEP);
-
-        editor.poll_ui_messages();
 
         editor.engine.post_update(FIXED_TIMESTEP);
 
         editor.post_update();
 
-        if dt >= 1.5 * FIXED_TIMESTEP {
+        if editor.game_loop_data.lag >= 1.5 * FIXED_TIMESTEP {
             break;
         }
     }

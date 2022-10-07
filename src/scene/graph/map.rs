@@ -3,8 +3,9 @@
 //! See [NodeHandleMap] docs for more info.
 
 use crate::{
-    core::{pool::Handle, variable::TemplateVariable},
+    core::{pool::Handle, reflect::Reflect, variable::InheritableVariable},
     scene::node::Node,
+    utils::log::Log,
 };
 use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
@@ -71,9 +72,12 @@ impl NodeHandleMap {
     /// Tries to silently map (without setting `modified` flag) a templated handle to a handle of its origin.
     /// If it exists, the method returns true or false otherwise. It should be used when you not sure that respective
     /// origin exists.
-    pub fn try_map_silent(&self, templated_handle: &mut TemplateVariable<Handle<Node>>) -> bool {
-        if let Some(new_handle) = self.map.get(templated_handle) {
-            templated_handle.set_silent(*new_handle);
+    pub fn try_map_silent(
+        &self,
+        inheritable_handle: &mut InheritableVariable<Handle<Node>>,
+    ) -> bool {
+        if let Some(new_handle) = self.map.get(inheritable_handle) {
+            inheritable_handle.set_silent(*new_handle);
             true
         } else {
             false
@@ -88,5 +92,110 @@ impl NodeHandleMap {
     /// Returns inner map.
     pub fn into_inner(self) -> FxHashMap<Handle<Node>, Handle<Node>> {
         self.map
+    }
+
+    /// Tries to remap handles to nodes in a given entity using reflection. It finds all supported fields recursively
+    /// (`Handle<Node>`, `Vec<Handle<Node>>`, `InheritableVariable<Handle<Node>>`, `InheritableVariable<Vec<Handle<Node>>>`)
+    /// and automatically maps old handles to new.
+    pub fn remap_handles(&self, node: &mut Node) {
+        let name = node.name_owned();
+        self.remap_handles_internal(node.as_reflect_mut(), &name);
+    }
+
+    fn remap_handles_internal(&self, entity: &mut dyn Reflect, node_name: &str) {
+        if let Some(handle) = entity.downcast_mut::<Handle<Node>>() {
+            if handle.is_some() && !self.try_map(handle) {
+                Log::warn(format!(
+                    "Failed to remap handle {} of node {}!",
+                    *handle, node_name
+                ));
+            }
+        } else if let Some(vec) = entity.downcast_mut::<Vec<Handle<Node>>>() {
+            for handle in vec {
+                if handle.is_some() && !self.try_map(handle) {
+                    Log::warn(format!(
+                        "Failed to remap handle {} in array of node {}!",
+                        *handle, node_name
+                    ));
+                }
+            }
+        } else if let Some(inheritable) = entity.as_inheritable_variable_mut() {
+            // In case of inheritable variable we must take inner value and do not mark variables as modified.
+            self.remap_handles_internal(inheritable.inner_value_mut(), node_name);
+        } else if let Some(array) = entity.as_array_mut() {
+            // Look in every array item.
+            for i in 0..array.reflect_len() {
+                self.remap_handles_internal(array.reflect_index_mut(i).unwrap(), node_name);
+            }
+        } else {
+            // Continue remapping recursively for every compound field.
+            for field in entity.fields_mut() {
+                self.remap_handles_internal(field.as_reflect_mut(), node_name);
+            }
+        }
+    }
+
+    pub(crate) fn remap_inheritable_handles(&self, node: &mut Node) {
+        let name = node.name_owned();
+        self.remap_inheritable_handles_internal(node.as_reflect_mut(), &name, false);
+    }
+
+    fn remap_inheritable_handles_internal(
+        &self,
+        entity: &mut dyn Reflect,
+        node_name: &str,
+        do_map: bool,
+    ) {
+        if let Some(inheritable) = entity.as_inheritable_variable_mut() {
+            // In case of inheritable variable we must take inner value and do not mark variables as modified.
+            if !inheritable.is_modified() {
+                self.remap_inheritable_handles_internal(
+                    inheritable.inner_value_mut(),
+                    node_name,
+                    // Raise mapping flag, any handle in inner value will be mapped. The flag is propagated
+                    // to unlimited depth.
+                    true,
+                );
+            }
+        } else if let Some(handle) = entity.downcast_mut::<Handle<Node>>() {
+            if do_map && handle.is_some() && !self.try_map(handle) {
+                Log::warn(format!(
+                    "Failed to remap handle {} of node {}!",
+                    *handle, node_name
+                ));
+            }
+        } else if let Some(vec) = entity.downcast_mut::<Vec<Handle<Node>>>() {
+            if do_map {
+                for handle in vec {
+                    if handle.is_some() && !self.try_map(handle) {
+                        Log::warn(format!(
+                            "Failed to remap handle {} in array of node {}!",
+                            *handle, node_name
+                        ));
+                    }
+                }
+            }
+        } else if let Some(array) = entity.as_array_mut() {
+            // Look in every array item.
+            for i in 0..array.reflect_len() {
+                self.remap_inheritable_handles_internal(
+                    array.reflect_index_mut(i).unwrap(),
+                    node_name,
+                    // Propagate mapping flag - it means that we're inside inheritable variable. In this
+                    // case we will map handles.
+                    do_map,
+                );
+            }
+        } else {
+            // Continue remapping recursively for every compound field.
+            for field in entity.fields_mut() {
+                self.remap_inheritable_handles_internal(
+                    field, node_name,
+                    // Propagate mapping flag - it means that we're inside inheritable variable. In this
+                    // case we will map handles.
+                    do_map,
+                );
+            }
+        }
     }
 }

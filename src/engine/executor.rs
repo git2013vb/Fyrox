@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+//! Executor is a small wrapper that manages plugins and scripts for your game.
 
 use crate::{
     core::{futures::executor::block_on, instant::Instant, pool::Handle},
@@ -6,7 +6,7 @@ use crate::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     plugin::PluginConstructor,
-    scene::{node::TypeUuidProvider, SceneLoader},
+    scene::SceneLoader,
     utils::{
         log::{Log, MessageKind},
         translate_event,
@@ -26,9 +26,11 @@ struct Args {
     override_scene: String,
 }
 
+/// Executor is a small wrapper that manages plugins and scripts for your game.
 pub struct Executor {
     event_loop: EventLoop<()>,
     engine: Engine,
+    desired_update_rate: f32,
 }
 
 impl Deref for Executor {
@@ -52,40 +54,63 @@ impl Default for Executor {
 }
 
 impl Executor {
-    pub fn new() -> Self {
+    /// Default update rate in frames per second.
+    pub const DEFAULT_UPDATE_RATE: f32 = 60.0;
+
+    /// Creates new game executor using specified set of parameters. Much more flexible version of
+    /// [`Executor::new`].
+    pub fn from_params(window_builder: WindowBuilder, vsync: bool) -> Self {
         let event_loop = EventLoop::new();
-
-        let window_builder = WindowBuilder::new()
-            .with_title("Fyrox Game Executor")
-            .with_resizable(true);
-
         let serialization_context = Arc::new(SerializationContext::new());
         let engine = Engine::new(EngineInitParams {
             window_builder,
             resource_manager: ResourceManager::new(serialization_context.clone()),
             serialization_context,
             events_loop: &event_loop,
-            vsync: true,
+            vsync,
         })
         .unwrap();
 
-        Self { event_loop, engine }
+        Self {
+            event_loop,
+            engine,
+            desired_update_rate: Self::DEFAULT_UPDATE_RATE,
+        }
     }
 
+    /// Creates new game executor using default window and with vsync turned on. For more flexible
+    /// way to create an executor see [`Executor::from_params`].
+    pub fn new() -> Self {
+        Self::from_params(
+            WindowBuilder::new()
+                .with_title("Fyrox Game Executor")
+                .with_resizable(true),
+            true,
+        )
+    }
+
+    /// Sets the desired update rate in frames per second.
+    pub fn set_desired_update_rate(&mut self, update_rate: f32) {
+        self.desired_update_rate = update_rate.abs();
+    }
+
+    /// Returns desired update rate in frames per second.
+    pub fn desired_update_rate(&self) -> f32 {
+        self.desired_update_rate
+    }
+
+    /// Adds new plugin constructor to the executor, the plugin will be enabled only on [`Executor::run`].
     pub fn add_plugin_constructor<P>(&mut self, plugin: P)
     where
-        P: PluginConstructor + TypeUuidProvider + 'static,
+        P: PluginConstructor + 'static,
     {
         self.engine.add_plugin_constructor(plugin)
     }
 
+    /// Runs the executor - starts your game. This function is never returns.
     pub fn run(self) -> ! {
         let mut engine = self.engine;
         let event_loop = self.event_loop;
-
-        let clock = Instant::now();
-        let fixed_timestep = 1.0 / 60.0;
-        let mut elapsed_time = 0.0;
 
         let args = Args::parse();
 
@@ -109,8 +134,12 @@ impl Executor {
 
         engine.enable_plugins(override_scene, true);
 
+        let mut previous = Instant::now();
+        let fixed_time_step = 1.0 / self.desired_update_rate;
+        let mut lag = 0.0;
+
         event_loop.run(move |event, _, control_flow| {
-            engine.handle_os_event_by_plugins(&event, fixed_timestep, control_flow);
+            engine.handle_os_event_by_plugins(&event, fixed_time_step, control_flow, &mut lag);
 
             let scenes = engine
                 .scenes
@@ -118,27 +147,23 @@ impl Executor {
                 .map(|(s, _)| s)
                 .collect::<Vec<_>>();
 
-            for scene_handle in scenes.iter() {
-                if !engine.scripted_scenes.contains(scene_handle) {
-                    engine.initialize_scene_scripts(*scene_handle, fixed_timestep);
-                    engine.scripted_scenes.insert(*scene_handle);
+            for &scene_handle in scenes.iter() {
+                if !engine.has_scripted_scene(scene_handle) {
+                    engine.register_scripted_scene(scene_handle);
                 }
 
-                engine
-                    .scripted_scenes
-                    .retain(|s| engine.scenes.is_valid_handle(*s));
-
-                engine.handle_os_event_by_scripts(&event, *scene_handle, fixed_timestep);
+                engine.handle_os_event_by_scripts(&event, scene_handle, fixed_time_step);
             }
 
             match event {
                 Event::MainEventsCleared => {
-                    let mut dt = clock.elapsed().as_secs_f32() - elapsed_time;
-                    while dt >= fixed_timestep {
-                        dt -= fixed_timestep;
-                        elapsed_time += fixed_timestep;
+                    let elapsed = previous.elapsed();
+                    previous = Instant::now();
+                    lag += elapsed.as_secs_f32();
 
-                        engine.update(fixed_timestep, control_flow);
+                    while lag >= fixed_time_step {
+                        engine.update(fixed_time_step, control_flow, &mut lag);
+                        lag -= fixed_time_step;
                     }
 
                     while let Some(_ui_event) = engine.user_interface.poll_message() {}

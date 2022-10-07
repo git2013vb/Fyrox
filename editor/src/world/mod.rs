@@ -1,5 +1,5 @@
-use crate::gui::make_image_button_with_tooltip;
 use crate::{
+    gui::make_image_button_with_tooltip,
     load_image,
     scene::{
         commands::{graph::LinkNodesCommand, ChangeSelectionCommand},
@@ -15,7 +15,7 @@ use crate::{
         },
         search::SearchBar,
     },
-    GameEngine, Message, Mode,
+    GameEngine, Message, Mode, Settings,
 };
 use fyrox::{
     core::{
@@ -44,6 +44,7 @@ use fyrox::{
         VerticalAlignment,
     },
     scene::{graph::Graph, node::Node, Scene},
+    utils::log::Log,
 };
 use std::{any::TypeId, cmp::Ordering, collections::HashMap, sync::mpsc::Sender};
 
@@ -56,7 +57,6 @@ pub struct WorldViewer {
     graph_folder: Handle<UiNode>,
     sender: Sender<Message>,
     track_selection: Handle<UiNode>,
-    track_selection_state: bool,
     search_bar: SearchBar,
     filter: String,
     stack: Vec<(Handle<UiNode>, Handle<Node>)>,
@@ -166,8 +166,7 @@ fn make_folder(ctx: &mut BuildContext, name: &str) -> Handle<UiNode> {
 }
 
 impl WorldViewer {
-    pub fn new(ctx: &mut BuildContext, sender: Sender<Message>) -> Self {
-        let track_selection_state = true;
+    pub fn new(ctx: &mut BuildContext, sender: Sender<Message>, settings: &Settings) -> Self {
         let tree_root;
         let node_path;
         let collapse_all;
@@ -237,7 +236,7 @@ impl WorldViewer {
                                                 .with_text("Track Selection")
                                                 .build(ctx),
                                         )
-                                        .checked(Some(track_selection_state))
+                                        .checked(Some(settings.selection.track_selection))
                                         .build(ctx);
                                         track_selection
                                     }),
@@ -294,7 +293,6 @@ impl WorldViewer {
         Self {
             search_bar,
             track_selection,
-            track_selection_state,
             window,
             sender,
             tree_root,
@@ -320,16 +318,7 @@ impl WorldViewer {
         let graph = &mut scene.graph;
         let ui = &mut engine.user_interface;
 
-        let mut selected_items = Vec::new();
-
-        selected_items.extend(self.sync_graph(ui, editor_scene, graph));
-
-        if !selected_items.is_empty() {
-            send_sync_message(
-                ui,
-                TreeRootMessage::select(self.tree_root, MessageDirection::ToWidget, selected_items),
-            );
-        }
+        self.sync_graph(ui, editor_scene, graph);
     }
 
     fn build_breadcrumb(
@@ -350,6 +339,13 @@ impl WorldViewer {
         self.breadcrumbs.insert(element, associated_item);
     }
 
+    fn clear_breadcrumbs(&mut self, ui: &UserInterface) {
+        self.breadcrumbs.clear();
+        for &child in ui.node(self.node_path).children() {
+            send_sync_message(ui, WidgetMessage::remove(child, MessageDirection::ToWidget));
+        }
+    }
+
     fn update_breadcrumbs(
         &mut self,
         ui: &mut UserInterface,
@@ -357,39 +353,29 @@ impl WorldViewer {
         scene: &Scene,
     ) {
         // Update breadcrumbs.
-        self.breadcrumbs.clear();
-        for &child in ui.node(self.node_path).children() {
-            send_sync_message(ui, WidgetMessage::remove(child, MessageDirection::ToWidget));
-        }
+        self.clear_breadcrumbs(ui);
 
         if let Selection::Graph(selection) = &editor_scene.selection {
             if let Some(&first_selected) = selection.nodes().first() {
-                let mut item = first_selected;
-                while item.is_some() {
-                    let node = &scene.graph[item];
+                let mut node_handle = first_selected;
+                while node_handle.is_some() {
+                    let node = &scene.graph[node_handle];
 
                     let view = ui.find_by_criteria_down(self.graph_folder, &|n| {
                         n.cast::<SceneItem<Node>>()
-                            .map(|i| i.entity_handle == item)
+                            .map(|i| i.entity_handle == node_handle)
                             .unwrap_or_default()
                     });
                     assert!(view.is_some());
-                    self.build_breadcrumb(node.name(), view, ui);
+                    self.build_breadcrumb(&format!("{} ({})", node.name(), node_handle), view, ui);
 
-                    item = node.parent();
+                    node_handle = node.parent();
                 }
             }
         }
     }
 
-    fn sync_graph(
-        &mut self,
-        ui: &mut UserInterface,
-        editor_scene: &EditorScene,
-        graph: &Graph,
-    ) -> Vec<Handle<UiNode>> {
-        let mut selected_items = Vec::new();
-
+    fn sync_graph(&mut self, ui: &mut UserInterface, editor_scene: &EditorScene, graph: &Graph) {
         // Sync tree structure with graph structure.
         self.stack.clear();
         self.stack.push((self.graph_folder, graph.get_root()));
@@ -476,11 +462,6 @@ impl WorldViewer {
                                         graph_node_item,
                                     ),
                                 );
-                                if let Selection::Graph(selection) = &editor_scene.selection {
-                                    if selection.contains(child_handle) {
-                                        selected_items.push(graph_node_item);
-                                    }
-                                }
                                 self.node_to_view_map.insert(child_handle, graph_node_item);
                                 self.stack.push((graph_node_item, child_handle));
                             }
@@ -543,8 +524,6 @@ impl WorldViewer {
 
         self.node_to_view_map
             .retain(|k, v| graph.is_valid_handle(*k) && ui.try_get_node(*v).is_some());
-
-        selected_items
     }
 
     pub fn colorize(&mut self, ui: &UserInterface) {
@@ -561,13 +540,10 @@ impl WorldViewer {
                 is_any_match |= apply_filter_recursive(child, filter, ui)
             }
 
-            // TODO: It is very easy to forget to add a new condition here if a new type
-            // of a scene item is added. Find a way of doing this in a better way.
-            // Also due to very simple RTTI in Rust, it becomes boilerplate-ish very quick.
             let name = node_ref.cast::<SceneItem<Node>>().map(|i| i.name());
 
             if let Some(name) = name {
-                is_any_match |= name.contains(filter);
+                is_any_match |= name.to_lowercase().contains(filter);
 
                 ui.send_message(WidgetMessage::visibility(
                     node,
@@ -579,7 +555,7 @@ impl WorldViewer {
             is_any_match
         }
 
-        apply_filter_recursive(self.tree_root, &self.filter, ui);
+        apply_filter_recursive(self.tree_root, &self.filter.to_lowercase(), ui);
     }
 
     pub fn set_filter(&mut self, filter: String, ui: &UserInterface) {
@@ -592,6 +568,7 @@ impl WorldViewer {
         message: &UiMessage,
         editor_scene: &mut EditorScene,
         engine: &GameEngine,
+        settings: &mut Settings,
     ) {
         scope_profile!();
 
@@ -648,7 +625,8 @@ impl WorldViewer {
         } else if let Some(CheckBoxMessage::Check(Some(value))) = message.data::<CheckBoxMessage>()
         {
             if message.destination() == self.track_selection {
-                self.track_selection_state = *value;
+                settings.selection.track_selection = *value;
+                Log::verify(settings.save());
                 if *value {
                     self.locate_selection(&editor_scene.selection, engine);
                 }
@@ -776,7 +754,12 @@ impl WorldViewer {
         }
     }
 
-    pub fn post_update(&mut self, editor_scene: &EditorScene, engine: &mut GameEngine) {
+    pub fn post_update(
+        &mut self,
+        editor_scene: &EditorScene,
+        engine: &mut GameEngine,
+        settings: &Settings,
+    ) {
         // Hack. See `self.sync_selection` for details.
         if self.sync_selection {
             let trees = self.map_selection(&editor_scene.selection, engine);
@@ -788,7 +771,7 @@ impl WorldViewer {
             );
 
             self.update_breadcrumbs(ui, editor_scene, &engine.scenes[editor_scene.scene]);
-            if self.track_selection_state {
+            if settings.selection.track_selection {
                 self.locate_selection(&editor_scene.selection, engine);
             }
 
@@ -798,11 +781,19 @@ impl WorldViewer {
 
     pub fn clear(&mut self, ui: &UserInterface) {
         self.node_to_view_map.clear();
-
+        self.clear_breadcrumbs(ui);
         ui.send_message(TreeMessage::set_items(
             self.graph_folder,
             MessageDirection::ToWidget,
             vec![],
+        ));
+    }
+
+    pub fn on_configure(&self, ui: &UserInterface, settings: &Settings) {
+        ui.send_message(CheckBoxMessage::checked(
+            self.track_selection,
+            MessageDirection::ToWidget,
+            Some(settings.selection.track_selection),
         ));
     }
 

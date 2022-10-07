@@ -228,6 +228,8 @@ impl InteractionMode for MoveInteractionMode {
                 handle != camera && handle != camera_pivot && handle != self.move_gizmo.origin
             },
             ignore_back_faces: settings.selection.ignore_back_faces,
+            use_picking_loop: true,
+            only_meshes: false,
         }) {
             if let Some(plane_kind) = self.move_gizmo.handle_pick(result.node, graph) {
                 if let Selection::Graph(selection) = &editor_scene.selection {
@@ -254,6 +256,8 @@ impl InteractionMode for MoveInteractionMode {
         settings: &Settings,
     ) {
         let scene = &mut engine.scenes[editor_scene.scene];
+
+        self.move_gizmo.reset_state(&mut scene.graph);
 
         if let Some(move_context) = self.move_context.take() {
             let mut changed = false;
@@ -298,6 +302,8 @@ impl InteractionMode for MoveInteractionMode {
                     editor_only: false,
                     filter: |_, _| true,
                     ignore_back_faces: settings.selection.ignore_back_faces,
+                    use_picking_loop: true,
+                    only_meshes: false,
                 })
                 .map(|result| {
                     if let (Selection::Graph(selection), true) = (
@@ -359,6 +365,7 @@ impl InteractionMode for MoveInteractionMode {
         editor_scene: &mut EditorScene,
         camera: Handle<Node>,
         engine: &mut GameEngine,
+        _settings: &Settings,
     ) {
         let scene = &mut engine.scenes[editor_scene.scene];
         let graph = &mut scene.graph;

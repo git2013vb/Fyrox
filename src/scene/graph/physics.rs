@@ -678,12 +678,11 @@ fn collider_shape_into_native_shape(
 /// each parameter.
 #[derive(Copy, Clone, Visit, Inspect, Reflect, Debug)]
 pub struct IntegrationParameters {
-    /// The timestep length (default: `1.0 / 60.0`)
-    #[inspect(
-        min_value = 0.0,
-        description = "The timestep length (default: `1.0 / 60.0`)"
-    )]
-    pub dt: f32,
+    /// The time step length, default is None - this means that physics simulation will use engine's
+    /// time step.
+    #[inspect(min_value = 0.0, description = "The time step length (default: None)")]
+    #[visit(optional)]
+    pub dt: Option<f32>,
 
     /// Minimum timestep size when using CCD with multiple substeps (default `1.0 / 60.0 / 100.0`)
     ///
@@ -811,7 +810,7 @@ pub struct IntegrationParameters {
 impl Default for IntegrationParameters {
     fn default() -> Self {
         Self {
-            dt: 1.0 / 60.0,
+            dt: None,
             min_ccd_dt: 1.0 / 60.0 / 100.0,
             erp: 0.8,
             damping_ratio: 0.25,
@@ -936,6 +935,10 @@ fn calculate_local_frames(
     )
 }
 
+fn u32_to_group(v: u32) -> rapier3d::geometry::Group {
+    rapier3d::geometry::Group::from_bits(v).unwrap_or_else(rapier3d::geometry::Group::all)
+}
+
 impl PhysicsWorld {
     /// Creates a new instance of the physics world.
     pub(super) fn new() -> Self {
@@ -971,12 +974,12 @@ impl PhysicsWorld {
         }
     }
 
-    pub(super) fn update(&mut self) {
+    pub(super) fn update(&mut self, dt: f32) {
         let time = instant::Instant::now();
 
         if self.enabled {
             let integration_parameters = rapier3d::dynamics::IntegrationParameters {
-                dt: self.integration_parameters.dt,
+                dt: self.integration_parameters.dt.unwrap_or(dt),
                 min_ccd_dt: self.integration_parameters.min_ccd_dt,
                 erp: self.integration_parameters.erp,
                 damping_ratio: self.integration_parameters.damping_ratio,
@@ -1124,8 +1127,8 @@ impl PhysicsWorld {
             opts.max_len,
             true,
             QueryFilter::new().groups(InteractionGroups::new(
-                opts.groups.memberships.0,
-                opts.groups.filter.0,
+                u32_to_group(opts.groups.memberships.0),
+                u32_to_group(opts.groups.filter.0),
             )),
             |handle, intersection| {
                 query_buffer.push(Intersection {
@@ -1397,13 +1400,15 @@ impl PhysicsWorld {
                         .try_sync_model(|v| native.set_restitution(v));
                     collider_node.collision_groups.try_sync_model(|v| {
                         native.set_collision_groups(InteractionGroups::new(
-                            v.memberships.0,
-                            v.filter.0,
+                            u32_to_group(v.memberships.0),
+                            u32_to_group(v.filter.0),
                         ))
                     });
                     collider_node.solver_groups.try_sync_model(|v| {
-                        native
-                            .set_solver_groups(InteractionGroups::new(v.memberships.0, v.filter.0))
+                        native.set_solver_groups(InteractionGroups::new(
+                            u32_to_group(v.memberships.0),
+                            u32_to_group(v.filter.0),
+                        ))
                     });
                     collider_node
                         .friction
@@ -1444,14 +1449,14 @@ impl PhysicsWorld {
                         .friction(collider_node.friction())
                         .restitution(collider_node.restitution())
                         .collision_groups(InteractionGroups::new(
-                            collider_node.collision_groups().memberships.0,
-                            collider_node.collision_groups().filter.0,
+                            u32_to_group(collider_node.collision_groups().memberships.0),
+                            u32_to_group(collider_node.collision_groups().filter.0),
                         ))
                         .friction_combine_rule(collider_node.friction_combine_rule().into())
                         .restitution_combine_rule(collider_node.restitution_combine_rule().into())
                         .solver_groups(InteractionGroups::new(
-                            collider_node.solver_groups().memberships.0,
-                            collider_node.solver_groups().filter.0,
+                            u32_to_group(collider_node.solver_groups().memberships.0),
+                            u32_to_group(collider_node.solver_groups().filter.0),
                         ))
                         .sensor(collider_node.is_sensor());
 

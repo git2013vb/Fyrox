@@ -401,10 +401,10 @@ pub trait Control: BaseControl + Deref<Target = Widget> + DerefMut {
 }
 
 pub struct DragContext {
-    is_dragging: bool,
-    drag_node: Handle<UiNode>,
-    click_pos: Vector2<f32>,
-    drag_preview: Handle<UiNode>,
+    pub is_dragging: bool,
+    pub drag_node: Handle<UiNode>,
+    pub click_pos: Vector2<f32>,
+    pub drag_preview: Handle<UiNode>,
 }
 
 impl Default for DragContext {
@@ -730,9 +730,10 @@ impl UserInterface {
             need_update_global_transform: Default::default(),
             default_font,
             double_click_entries: Default::default(),
-            double_click_time_slice: 0.75,
+            double_click_time_slice: 0.5, // 500 ms is standard in most operating systems.
         };
         ui.root_canvas = ui.add_node(UiNode::new(Canvas::new(WidgetBuilder::new().build())));
+        ui.keyboard_focus_node = ui.root_canvas;
         ui
     }
 
@@ -1495,9 +1496,9 @@ impl UserInterface {
         match self.receiver.try_recv() {
             Ok(mut message) => {
                 // Destination node may be destroyed at the time we receive message,
-                // we have to discard such messages.
+                // we have skip processing of such messages.
                 if !self.nodes.is_valid_handle(message.destination()) {
-                    return None;
+                    return Some(message);
                 }
 
                 if message.need_perform_layout() {
@@ -1536,6 +1537,20 @@ impl UserInterface {
                                 for child in self.stack.iter() {
                                     parent.add_child(*child, false);
                                 }
+                            }
+                        }
+                        WidgetMessage::Focus => {
+                            if message.destination().is_some()
+                                && message.direction() == MessageDirection::ToWidget
+                            {
+                                self.request_focus(message.destination());
+                            }
+                        }
+                        WidgetMessage::Unfocus => {
+                            if message.destination().is_some()
+                                && message.direction() == MessageDirection::ToWidget
+                            {
+                                self.request_focus(self.root_canvas);
                             }
                         }
                         WidgetMessage::Topmost => {
@@ -1769,6 +1784,26 @@ impl UserInterface {
         }
     }
 
+    fn request_focus(&mut self, new_focused: Handle<UiNode>) {
+        if self.keyboard_focus_node != new_focused {
+            if self.keyboard_focus_node.is_some() {
+                self.send_message(WidgetMessage::unfocus(
+                    self.keyboard_focus_node,
+                    MessageDirection::FromWidget,
+                ));
+            }
+
+            self.keyboard_focus_node = new_focused;
+
+            if self.keyboard_focus_node.is_some() {
+                self.send_message(WidgetMessage::focus(
+                    self.keyboard_focus_node,
+                    MessageDirection::FromWidget,
+                ));
+            }
+        }
+    }
+
     /// Translates raw window event into some specific UI message. This is one of the
     /// most important methods of UI. You must call it each time you received a message
     /// from a window.
@@ -1789,6 +1824,7 @@ impl UserInterface {
                         let picked_changed =
                             self.try_set_picked_node(self.hit_test(self.cursor_position));
 
+                        let mut emit_double_click = false;
                         if !picked_changed {
                             match self.double_click_entries.entry(button) {
                                 Entry::Occupied(e) => {
@@ -1798,12 +1834,7 @@ impl UserInterface {
                                         if entry.click_count >= 2 {
                                             entry.click_count = 0;
                                             entry.timer = self.double_click_time_slice;
-
-                                            self.send_message(WidgetMessage::double_click(
-                                                self.picked_node,
-                                                MessageDirection::FromWidget,
-                                                button,
-                                            ));
+                                            emit_double_click = true;
                                         }
                                     } else {
                                         entry.timer = self.double_click_time_slice;
@@ -1838,23 +1869,7 @@ impl UserInterface {
                             self.drag_context.click_pos = self.cursor_position;
                         }
 
-                        if self.keyboard_focus_node != self.picked_node {
-                            if self.keyboard_focus_node.is_some() {
-                                self.send_message(WidgetMessage::lost_focus(
-                                    self.keyboard_focus_node,
-                                    MessageDirection::FromWidget,
-                                ));
-                            }
-
-                            self.keyboard_focus_node = self.picked_node;
-
-                            if self.keyboard_focus_node.is_some() {
-                                self.send_message(WidgetMessage::got_focus(
-                                    self.keyboard_focus_node,
-                                    MessageDirection::FromWidget,
-                                ));
-                            }
-                        }
+                        self.request_focus(self.picked_node);
 
                         if self.picked_node.is_some() {
                             self.send_message(WidgetMessage::mouse_down(
@@ -1865,9 +1880,25 @@ impl UserInterface {
                             ));
                             event_processed = true;
                         }
+
+                        // Make sure double click will be emitted after mouse down event.
+                        if emit_double_click {
+                            self.send_message(WidgetMessage::double_click(
+                                self.picked_node,
+                                MessageDirection::FromWidget,
+                                button,
+                            ));
+                        }
                     }
                     ButtonState::Released => {
                         if self.picked_node.is_some() {
+                            self.send_message(WidgetMessage::mouse_up(
+                                self.picked_node,
+                                MessageDirection::FromWidget,
+                                self.cursor_position,
+                                button,
+                            ));
+
                             if self.drag_context.is_dragging {
                                 self.drag_context.is_dragging = false;
                                 self.cursor_icon = CursorIcon::Default;
@@ -1896,12 +1927,6 @@ impl UserInterface {
                                 self.drag_context.drag_preview = Default::default();
                             }
 
-                            self.send_message(WidgetMessage::mouse_up(
-                                self.picked_node,
-                                MessageDirection::FromWidget,
-                                self.cursor_position,
-                                button,
-                            ));
                             event_processed = true;
                         }
                     }
@@ -1920,6 +1945,14 @@ impl UserInterface {
                     self.drag_context.drag_preview =
                         self.copy_node_with_limit(self.drag_context.drag_node, Some(30));
                     self.nodes[self.drag_context.drag_preview].set_opacity(Some(0.5));
+
+                    // Make preview nodes invisible for hit test.
+                    let mut stack = vec![self.drag_context.drag_preview];
+                    while let Some(handle) = stack.pop() {
+                        let preview_node = &mut self.nodes[handle];
+                        preview_node.hit_test_visibility = false;
+                        stack.extend_from_slice(preview_node.children());
+                    }
 
                     self.drag_context.is_dragging = true;
 
@@ -2145,6 +2178,10 @@ impl UserInterface {
         }
 
         self.preview_set.remove(&node);
+    }
+
+    pub fn drag_context(&self) -> &DragContext {
+        &self.drag_context
     }
 
     /// Links specified child with specified parent.
@@ -2471,13 +2508,14 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
 mod test {
     use crate::{
         border::BorderBuilder,
-        core::algebra::Vector2,
+        core::algebra::{Rotation2, UnitComplex, Vector2},
         message::MessageDirection,
+        text::TextMessage,
+        text_box::TextBoxBuilder,
         transform_size,
         widget::{WidgetBuilder, WidgetMessage},
-        UserInterface,
+        OsEvent, UserInterface,
     };
-    use fyrox_core::algebra::{Rotation2, UnitComplex};
 
     #[test]
     fn test_transform_size() {
@@ -2506,5 +2544,61 @@ mod test {
         let expected_position = (screen_size - widget_size).scale(0.5);
         let actual_position = ui.node(widget).actual_local_position();
         assert_eq!(actual_position, expected_position);
+    }
+
+    #[test]
+    fn test_keyboard_focus() {
+        let screen_size = Vector2::new(1000.0, 1000.0);
+        let mut ui = UserInterface::new(screen_size);
+
+        let text_box = TextBoxBuilder::new(WidgetBuilder::new()).build(&mut ui.build_ctx());
+
+        // Make sure layout was calculated.
+        ui.update(screen_size, 0.0);
+
+        assert!(ui.poll_message().is_none());
+
+        ui.send_message(WidgetMessage::focus(text_box, MessageDirection::ToWidget));
+
+        // Ensure that the message has gotten in the queue.
+        assert_eq!(
+            ui.poll_message(),
+            Some(WidgetMessage::focus(text_box, MessageDirection::ToWidget))
+        );
+        // Root must be unfocused right before new widget is focused.
+        assert_eq!(
+            ui.poll_message(),
+            Some(WidgetMessage::unfocus(
+                ui.root(),
+                MessageDirection::FromWidget
+            ))
+        );
+        // Finally there should be a response from newly focused node.
+        assert_eq!(
+            ui.poll_message(),
+            Some(WidgetMessage::focus(text_box, MessageDirection::FromWidget))
+        );
+
+        // Do additional check - emulate key press of "A" and check if the focused text box has accepted it.
+        ui.process_os_event(&OsEvent::Character('A'));
+
+        assert_eq!(
+            ui.poll_message(),
+            Some(WidgetMessage::text(
+                text_box,
+                MessageDirection::FromWidget,
+                'A'
+            ))
+        );
+        assert_eq!(
+            ui.poll_message(),
+            Some(TextMessage::text(
+                text_box,
+                MessageDirection::ToWidget,
+                "A".to_string()
+            ))
+        );
+
+        assert!(ui.poll_message().is_none());
     }
 }

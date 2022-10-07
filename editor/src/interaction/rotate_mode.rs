@@ -67,6 +67,8 @@ impl InteractionMode for RotateInteractionMode {
                 handle != camera && handle != camera_pivot && handle != self.rotation_gizmo.origin
             },
             ignore_back_faces: settings.selection.ignore_back_faces,
+            use_picking_loop: true,
+            only_meshes: false,
         }) {
             if self
                 .rotation_gizmo
@@ -90,6 +92,8 @@ impl InteractionMode for RotateInteractionMode {
         settings: &Settings,
     ) {
         let graph = &mut engine.scenes[editor_scene.scene].graph;
+
+        self.rotation_gizmo.reset_state(graph);
 
         if self.interacting {
             if let Selection::Graph(selection) = &editor_scene.selection {
@@ -129,6 +133,8 @@ impl InteractionMode for RotateInteractionMode {
                     editor_only: false,
                     filter: |_, _| true,
                     ignore_back_faces: settings.selection.ignore_back_faces,
+                    use_picking_loop: true,
+                    only_meshes: false,
                 })
                 .map(|result| {
                     if let (Selection::Graph(selection), true) = (
@@ -206,6 +212,7 @@ impl InteractionMode for RotateInteractionMode {
         editor_scene: &mut EditorScene,
         camera: Handle<Node>,
         engine: &mut GameEngine,
+        _settings: &Settings,
     ) {
         if let Selection::Graph(selection) = &editor_scene.selection {
             let graph = &mut engine.scenes[editor_scene.scene].graph;

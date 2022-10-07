@@ -66,6 +66,8 @@ impl InteractionMode for ScaleInteractionMode {
                 editor_only: true,
                 filter: |handle, _| handle != camera && handle != camera_pivot,
                 ignore_back_faces: settings.selection.ignore_back_faces,
+                use_picking_loop: true,
+                only_meshes: false,
             }) {
                 if self
                     .scale_gizmo
@@ -88,6 +90,8 @@ impl InteractionMode for ScaleInteractionMode {
         settings: &Settings,
     ) {
         let graph = &mut engine.scenes[editor_scene.scene].graph;
+
+        self.scale_gizmo.reset_state(graph);
 
         if self.interacting {
             if let Selection::Graph(selection) = &editor_scene.selection {
@@ -125,6 +129,8 @@ impl InteractionMode for ScaleInteractionMode {
                     editor_only: false,
                     filter: |_, _| true,
                     ignore_back_faces: settings.selection.ignore_back_faces,
+                    use_picking_loop: true,
+                    only_meshes: false,
                 })
                 .map(|result| {
                     if let (Selection::Graph(selection), true) = (
@@ -189,6 +195,7 @@ impl InteractionMode for ScaleInteractionMode {
         editor_scene: &mut EditorScene,
         camera: Handle<Node>,
         engine: &mut GameEngine,
+        _settings: &Settings,
     ) {
         if let Selection::Graph(selection) = &editor_scene.selection {
             let graph = &mut engine.scenes[editor_scene.scene].graph;

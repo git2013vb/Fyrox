@@ -85,6 +85,13 @@ impl Character {
             glyph_index: font.glyph_index(char_code).unwrap_or_default() as u32,
         }
     }
+
+    #[inline]
+    pub fn is_whitespace(&self) -> bool {
+        char::from_u32(self.char_code)
+            .unwrap_or_default()
+            .is_whitespace()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +110,10 @@ pub struct FormattedText {
     constraint: Vector2<f32>,
     wrap: WrapMode,
     mask_char: Option<Character>,
+    pub shadow: bool,
+    pub shadow_brush: Brush,
+    pub shadow_dilation: f32,
+    pub shadow_offset: Vector2<f32>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -179,7 +190,7 @@ impl FormattedText {
         let mut width = 0.0;
         let font = self.font.0.lock();
         for index in range {
-            width += font.glyph_advance(self.text[index].glyph_index);
+            width += font.glyph_advance(self.text[index].char_code);
         }
         width
     }
@@ -201,6 +212,31 @@ impl FormattedText {
 
     pub fn set_wrap(&mut self, wrap: WrapMode) -> &mut Self {
         self.wrap = wrap;
+        self
+    }
+
+    /// Sets whether the shadow enabled or not.
+    pub fn set_shadow(&mut self, shadow: bool) -> &mut Self {
+        self.shadow = shadow;
+        self
+    }
+
+    /// Sets desired shadow brush. It will be used to render the shadow.
+    pub fn set_shadow_brush(&mut self, brush: Brush) -> &mut Self {
+        self.shadow_brush = brush;
+        self
+    }
+
+    /// Sets desired shadow dilation in units. Keep in mind that the dilation is absolute,
+    /// not percentage-based.
+    pub fn set_shadow_dilation(&mut self, thickness: f32) -> &mut Self {
+        self.shadow_dilation = thickness;
+        self
+    }
+
+    /// Sets desired shadow offset in units.
+    pub fn set_shadow_offset(&mut self, offset: Vector2<f32>) -> &mut Self {
+        self.shadow_offset = offset;
         self
     }
 
@@ -317,29 +353,30 @@ impl FormattedText {
                     }
                     WrapMode::Word => {
                         if word_ended {
-                            let word = word.take().unwrap();
-                            if word.width > self.constraint.x {
-                                // The word is longer than available constraints.
-                                // Push the word as a whole.
-                                current_line.width += word.width;
-                                current_line.end += word.length;
-                                self.lines.push(current_line);
-                                current_line.begin = current_line.end;
-                                current_line.width = 0.0;
-                                total_height += font.ascender();
-                            } else if current_line.width + word.width > self.constraint.x {
-                                // The word will exceed horizontal constraint, we have to
-                                // commit current line and move the word in the next line.
-                                self.lines.push(current_line);
-                                current_line.begin = i - word.length;
-                                current_line.end = i;
-                                current_line.width = word.width;
-                                total_height += font.ascender();
-                            } else {
-                                // The word does not exceed horizontal constraint, append it
-                                // to the line.
-                                current_line.width += word.width;
-                                current_line.end += word.length;
+                            if let Some(word) = word.take() {
+                                if word.width > self.constraint.x {
+                                    // The word is longer than available constraints.
+                                    // Push the word as a whole.
+                                    current_line.width += word.width;
+                                    current_line.end += word.length;
+                                    self.lines.push(current_line);
+                                    current_line.begin = current_line.end;
+                                    current_line.width = 0.0;
+                                    total_height += font.ascender();
+                                } else if current_line.width + word.width > self.constraint.x {
+                                    // The word will exceed horizontal constraint, we have to
+                                    // commit current line and move the word in the next line.
+                                    self.lines.push(current_line);
+                                    current_line.begin = i - word.length;
+                                    current_line.end = i;
+                                    current_line.width = word.width;
+                                    total_height += font.ascender();
+                                } else {
+                                    // The word does not exceed horizontal constraint, append it
+                                    // to the line.
+                                    current_line.width += word.width;
+                                    current_line.end += word.length;
+                                }
                             }
                         }
 
@@ -479,6 +516,10 @@ pub struct FormattedTextBuilder {
     horizontal_alignment: HorizontalAlignment,
     wrap: WrapMode,
     mask_char: Option<char>,
+    shadow: bool,
+    shadow_brush: Brush,
+    shadow_dilation: f32,
+    shadow_offset: Vector2<f32>,
 }
 
 impl FormattedTextBuilder {
@@ -493,6 +534,10 @@ impl FormattedTextBuilder {
             constraint: Vector2::new(128.0, 128.0),
             wrap: WrapMode::NoWrap,
             mask_char: None,
+            shadow: false,
+            shadow_brush: Brush::Solid(Color::BLACK),
+            shadow_dilation: 1.0,
+            shadow_offset: Vector2::new(1.0, 1.0),
         }
     }
 
@@ -531,6 +576,31 @@ impl FormattedTextBuilder {
         self
     }
 
+    /// Whether the shadow enabled or not.
+    pub fn with_shadow(mut self, shadow: bool) -> Self {
+        self.shadow = shadow;
+        self
+    }
+
+    /// Sets desired shadow brush. It will be used to render the shadow.
+    pub fn with_shadow_brush(mut self, brush: Brush) -> Self {
+        self.shadow_brush = brush;
+        self
+    }
+
+    /// Sets desired shadow dilation in units. Keep in mind that the dilation is absolute,
+    /// not percentage-based.
+    pub fn with_shadow_dilation(mut self, thickness: f32) -> Self {
+        self.shadow_dilation = thickness;
+        self
+    }
+
+    /// Sets desired shadow offset in units.
+    pub fn with_shadow_offset(mut self, offset: Vector2<f32>) -> Self {
+        self.shadow_offset = offset;
+        self
+    }
+
     pub fn build(self) -> FormattedText {
         let font = self.font.0.lock();
         FormattedText {
@@ -549,10 +619,14 @@ impl FormattedTextBuilder {
             mask_char: self
                 .mask_char
                 .map(|code| Character::from_char_with_font(u32::from(code), &font)),
+            shadow: self.shadow,
+            shadow_brush: self.shadow_brush,
             font: {
                 drop(font);
                 self.font
             },
+            shadow_dilation: self.shadow_dilation,
+            shadow_offset: self.shadow_offset,
         }
     }
 }

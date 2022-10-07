@@ -3,7 +3,7 @@
 
 use crate::{
     asset::{Resource, ResourceData, ResourceLoadError, ResourceState},
-    core::{futures::future::JoinAll, variable::TemplateVariable, VecExtensions},
+    core::{futures::future::JoinAll, variable::InheritableVariable, VecExtensions},
     engine::resource_manager::{
         container::{
             entry::{TimedEntry, DEFAULT_RESOURCE_LIFETIME},
@@ -238,14 +238,16 @@ where
 
     /// Reloads a single resource.
     pub fn reload_resource(&mut self, resource: T) {
-        resource.state().switch_to_pending_state();
+        if !resource.is_loading() {
+            resource.state().switch_to_pending_state();
 
-        self.task_pool.spawn_task(self.loader.load(
-            resource,
-            self.default_import_options.clone(),
-            self.event_broadcaster.clone(),
-            true,
-        ));
+            self.task_pool.spawn_task(self.loader.load(
+                resource,
+                self.default_import_options.clone(),
+                self.event_broadcaster.clone(),
+                true,
+            ));
+        }
     }
 
     /// Reloads all resources in the container. Returns a list of resources that will be reloaded.
@@ -291,11 +293,11 @@ where
     /// Tries to restore resource by making an attempt to request resource with path from existing
     /// resource instance. This method is used to restore "shallow" resources after scene
     /// deserialization.
-    pub fn try_restore_template_resource(
+    pub fn try_restore_inheritable_resource(
         &mut self,
-        template_resource: &mut TemplateVariable<Option<T>>,
+        inheritable_resource: &mut InheritableVariable<Option<T>>,
     ) {
-        if let Some(shallow_resource) = template_resource.get_mut_silent().as_mut() {
+        if let Some(shallow_resource) = inheritable_resource.get_mut_silent().as_mut() {
             let new_resource = self.request(shallow_resource.state().path());
             *shallow_resource = new_resource;
         }

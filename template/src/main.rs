@@ -77,22 +77,15 @@ use fyrox::{
     core::{
         futures::executor::block_on,
         pool::Handle,
-        uuid::{uuid, Uuid},
     },
     event::Event,
     event_loop::ControlFlow,
     gui::message::UiMessage,
     plugin::{Plugin, PluginConstructor, PluginContext, PluginRegistrationContext},
-    scene::{node::TypeUuidProvider, Scene, SceneLoader},
+    scene::{Scene, SceneLoader},
 };
 
 pub struct GameConstructor;
-
-impl TypeUuidProvider for GameConstructor {
-    fn type_uuid() -> Uuid {
-        uuid!("f615ac42-b259-4a23-bb44-407d753ac178")
-    }
-}
 
 impl PluginConstructor for GameConstructor {
     fn register(&self, _context: PluginRegistrationContext) {
@@ -141,10 +134,6 @@ impl Plugin for Game {
 
     fn update(&mut self, _context: &mut PluginContext, _control_flow: &mut ControlFlow) {
         // Add your global update code here.
-    }
-
-    fn id(&self) -> Uuid {
-        GameConstructor::type_uuid()
     }
 
     fn on_os_event(
@@ -279,7 +268,7 @@ fn init_workspace(base_path: &Path) {
         base_path.join("Cargo.toml"),
         r#"
 [workspace]
-members = ["editor", "executor", "game"]"
+members = ["editor", "executor", "game"]
 
 # Optimize the engine in debug builds, but leave project's code non-optimized.
 # By using this technique, you can still debug you code, but engine will be fully
@@ -323,12 +312,11 @@ fn init_script(raw_name: &str) {
         file_name,
         format!(
             r#"
-use crate::GameConstructor;
 use fyrox::{{
     core::{{inspect::prelude::*, uuid::{{Uuid, uuid}}, visitor::prelude::*, reflect::Reflect}},
     engine::resource_manager::ResourceManager,
-    event::Event, impl_component_provider, impl_directly_inheritable_entity_trait,
-    scene::{{graph::map::NodeHandleMap, node::TypeUuidProvider}},
+    event::Event, impl_component_provider,
+    scene::{{node::TypeUuidProvider}},
     script::{{ScriptContext, ScriptDeinitContext, ScriptTrait}},
 }};
 
@@ -338,9 +326,6 @@ pub struct {name} {{
 }}
 
 impl_component_provider!({name});
-impl_directly_inheritable_entity_trait!({name};
-    // Add inheritable (TemplateVariable<T>) fields here.
-);
 
 impl TypeUuidProvider for {name} {{
     fn type_uuid() -> Uuid {{
@@ -349,24 +334,25 @@ impl TypeUuidProvider for {name} {{
 }}
 
 impl ScriptTrait for {name} {{
-    fn on_init(&mut self, context: ScriptContext) {{
+    fn on_init(&mut self, context: &mut ScriptContext) {{
         // Put initialization logic here.
     }}
 
-    fn on_deinit(&mut self, context: ScriptDeinitContext) {{
+    fn on_start(&mut self, context: &mut ScriptContext) {{
+        // There should be a logic that depends on other scripts in scene.
+        // It is called right after **all** scripts were initialized.
+    }}
+
+    fn on_deinit(&mut self, context: &mut ScriptDeinitContext) {{
         // Put de-initialization logic here.
     }}
 
-    fn on_os_event(&mut self, event: &Event<()>, context: ScriptContext) {{
+    fn on_os_event(&mut self, event: &Event<()>, context: &mut ScriptContext) {{
         // Respond to OS events here.
     }}
 
-    fn on_update(&mut self, context: ScriptContext) {{
+    fn on_update(&mut self, context: &mut ScriptContext) {{
         // Put object logic here.
-    }}
-
-    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {{
-        // Remap handles to other scene nodes here.
     }}
 
     fn restore_resources(&mut self, resource_manager: ResourceManager) {{
@@ -375,10 +361,6 @@ impl ScriptTrait for {name} {{
 
     fn id(&self) -> Uuid {{
         Self::type_uuid()
-    }}
-
-    fn plugin_uuid(&self) -> Uuid {{
-        GameConstructor::type_uuid()
     }}
 }}
     "#,

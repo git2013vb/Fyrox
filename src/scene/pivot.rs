@@ -1,7 +1,5 @@
 //! A simplest possible node which represents point in space.
-use crate::scene::graph::map::NodeHandleMap;
 use crate::{
-    core::variable::InheritError,
     core::{
         inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
@@ -62,20 +60,8 @@ impl NodeTrait for Pivot {
         self.base.world_bounding_box()
     }
 
-    fn inherit(&mut self, parent: &Node) -> Result<(), InheritError> {
-        self.base.inherit_properties(parent)
-    }
-
-    fn reset_inheritable_properties(&mut self) {
-        self.base.reset_inheritable_properties()
-    }
-
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
         self.base.restore_resources(resource_manager)
-    }
-
-    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
-        self.base.remap_handles(old_new_mapping)
     }
 
     fn id(&self) -> Uuid {

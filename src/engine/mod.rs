@@ -7,7 +7,6 @@ pub mod error;
 pub mod executor;
 pub mod resource_manager;
 
-use crate::plugin::{PluginConstructor, SoundEngineHelper};
 use crate::{
     asset::ResourceState,
     core::{algebra::Vector2, futures::executor::block_on, instant, pool::Handle},
@@ -18,23 +17,24 @@ use crate::{
     event::Event,
     event_loop::{ControlFlow, EventLoop},
     gui::UserInterface,
-    plugin::{Plugin, PluginContext, PluginRegistrationContext},
+    plugin::{
+        Plugin, PluginConstructor, PluginContext, PluginRegistrationContext, SoundEngineHelper,
+    },
     renderer::{framework::error::FrameworkError, Renderer},
     resource::{model::Model, texture::TextureKind},
     scene::{
-        graph::event::GraphEvent,
-        node::{constructor::NodeConstructorContainer, Node, TypeUuidProvider},
-        sound::SoundEngine,
+        base::ScriptMessage, node::constructor::NodeConstructorContainer, sound::SoundEngine,
         Scene, SceneContainer,
     },
     script::{constructor::ScriptConstructorContainer, Script, ScriptContext, ScriptDeinitContext},
     utils::log::Log,
     window::{Window, WindowBuilder},
 };
+use fxhash::FxHashSet;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     sync::{
-        mpsc::{self, channel, Receiver},
+        mpsc::{channel, Receiver},
         Arc, Mutex,
     },
     time::Duration,
@@ -103,12 +103,225 @@ pub struct Engine {
 
     plugins_enabled: bool,
 
+    // Amount of time (in seconds) that passed from creation of the engine.
+    elapsed_time: f32,
+
     /// A special container that is able to create nodes by their type UUID. Use a copy of this
     /// value whenever you need it as a parameter in other parts of the engine.
     pub serialization_context: Arc<SerializationContext>,
 
-    /// Defines a set of scenes whose scripts can be processed by the engine.
-    pub scripted_scenes: HashSet<Handle<Scene>>,
+    script_processor: ScriptProcessor,
+}
+
+#[derive(Default)]
+struct ScriptProcessor {
+    scripted_scenes: FxHashSet<Handle<Scene>>,
+}
+
+impl ScriptProcessor {
+    fn has_scripted_scene(&self, scene: Handle<Scene>) -> bool {
+        self.scripted_scenes.contains(&scene)
+    }
+
+    fn register_scripted_scene(
+        &mut self,
+        scene: Handle<Scene>,
+        scenes: &mut SceneContainer,
+        resource_manager: &ResourceManager,
+    ) {
+        // Register the scene and ensure that it wasn't registered previously.
+        let added = self.scripted_scenes.insert(scene);
+
+        assert!(added);
+
+        let graph = &mut scenes[scene].graph;
+
+        // Spawn events for each node in the scene to force the engine to
+        // initialize scripts.
+        for (handle, _) in graph.pair_iter() {
+            graph
+                .script_message_sender
+                .send(ScriptMessage::InitializeScript { handle })
+                .unwrap();
+        }
+
+        // Wait until all resources are fully loaded (or failed to load). It is needed
+        // because some scripts may use resources and any attempt to use non loaded resource
+        // will result in panic.
+        let wait_context = resource_manager.state().containers_mut().wait_concurrent();
+        block_on(wait_context.wait_concurrent());
+    }
+
+    fn handle_scripts(
+        &mut self,
+        scenes: &mut SceneContainer,
+        plugins: &mut Vec<Box<dyn Plugin>>,
+        resource_manager: &ResourceManager,
+        dt: f32,
+        elapsed_time: f32,
+    ) {
+        self.scripted_scenes
+            .retain(|handle| scenes.is_valid_handle(*handle));
+
+        'scene_loop: for &scene_handle in self.scripted_scenes.iter() {
+            let scene = &mut scenes[scene_handle];
+
+            // Disabled scenes should not update their scripts.
+            if !scene.enabled {
+                continue 'scene_loop;
+            }
+
+            // Fill in initial handles to nodes to update.
+            let mut update_queue = VecDeque::new();
+            for (handle, node) in scene.graph.pair_iter() {
+                if let Some(script) = node.script.as_ref() {
+                    if script.initialized && script.started {
+                        update_queue.push_back(handle);
+                    }
+                }
+            }
+
+            // We'll gather all scripts queued for destruction and destroy them all at once at the
+            // end of the frame.
+            let mut destruction_queue = VecDeque::new();
+
+            let max_iterations = 64;
+
+            'update_loop: for update_loop_iteration in 0..max_iterations {
+                let mut context = ScriptContext {
+                    dt,
+                    elapsed_time,
+                    plugins,
+                    handle: Default::default(),
+                    scene,
+                    resource_manager,
+                };
+
+                'init_loop: for init_loop_iteration in 0..max_iterations {
+                    let mut start_queue = VecDeque::new();
+
+                    // Process events first. `on_init` of a script can also create some other instances
+                    // and these will be correctly initialized on current frame.
+                    while let Ok(event) = context.scene.graph.script_message_receiver.try_recv() {
+                        match event {
+                            ScriptMessage::InitializeScript { handle } => {
+                                context.handle = handle;
+
+                                process_node(&mut context, &mut |script, context| {
+                                    if !script.initialized {
+                                        script.on_init(context);
+                                        script.initialized = true;
+                                    }
+
+                                    // `on_start` must be called even if the script was initialized.
+                                    start_queue.push_back(handle);
+                                });
+                            }
+                            ScriptMessage::DestroyScript { handle, script } => {
+                                // Destruction is delayed to the end of the frame.
+                                destruction_queue.push_back((handle, script));
+                            }
+                        }
+                    }
+
+                    if start_queue.is_empty() {
+                        // There is no more new nodes, we can safely leave the init loop.
+                        break 'init_loop;
+                    } else {
+                        // Call `on_start` for every recently initialized node and go to next
+                        // iteration of init loop. This is needed because `on_start` can spawn
+                        // some other nodes that must be initialized before update.
+                        while let Some(node) = start_queue.pop_front() {
+                            context.handle = node;
+
+                            process_node(&mut context, &mut |script, context| {
+                                if !script.started {
+                                    script.on_start(context);
+                                    script.started = true;
+
+                                    update_queue.push_back(node);
+                                }
+                            });
+                        }
+                    }
+
+                    if init_loop_iteration == max_iterations - 1 {
+                        Log::warn(
+                            "Infinite init loop detected! Most likely some of \
+                    your scripts causing infinite prefab instantiation!",
+                        )
+                    }
+                }
+
+                // Update all initialized and started scripts until there is something to initialize.
+                if update_queue.is_empty() {
+                    break 'update_loop;
+                } else {
+                    while let Some(handle) = update_queue.pop_front() {
+                        context.handle = handle;
+
+                        process_node(&mut context, &mut |script, context| {
+                            script.on_update(context);
+                        });
+                    }
+                }
+
+                if update_loop_iteration == max_iterations - 1 {
+                    Log::warn(
+                        "Infinite update loop detected! Most likely some of \
+                    your scripts causing infinite prefab instantiation!",
+                    )
+                }
+            }
+
+            // As the last step, destroy queued scripts.
+            let mut context = ScriptDeinitContext {
+                elapsed_time,
+                plugins,
+                resource_manager,
+                scene,
+                node_handle: Default::default(),
+            };
+            while let Some((handle, mut script)) = destruction_queue.pop_front() {
+                context.node_handle = handle;
+
+                // `on_deinit` could also spawn new nodes, but we won't take those into account on
+                // this frame. They'll be correctly handled on next frame.
+                script.on_deinit(&mut context);
+            }
+        }
+
+        // Process scripts from destroyed scenes.
+        for (handle, mut detached_scene) in scenes.destruction_list.drain(..) {
+            if self.scripted_scenes.contains(&handle) {
+                let mut context = ScriptDeinitContext {
+                    elapsed_time,
+                    plugins,
+                    resource_manager,
+                    scene: &mut detached_scene,
+                    node_handle: Default::default(),
+                };
+
+                // Destroy every script instance from nodes that were still alive.
+                for node_index in 0..context.scene.graph.capacity() {
+                    context.node_handle = context.scene.graph.handle_from_index(node_index);
+
+                    if let Some(mut script) = context
+                        .scene
+                        .graph
+                        .try_get_mut(context.node_handle)
+                        .and_then(|node| node.script.take())
+                    {
+                        // A script could not be initialized in case if we added a scene, and then immediately
+                        // removed it. Calling `on_deinit` in this case would be a violation of API contract.
+                        if script.initialized {
+                            script.on_deinit(&mut context)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct ResourceGraphVertex {
@@ -156,15 +369,18 @@ impl ResourceGraphVertex {
             self.resource.state().path().display()
         ));
 
-        block_on(
-            self.resource
-                .data_ref()
-                .get_scene_mut()
-                .resolve(self.resource_manager.clone()),
-        );
+        // Wait until resource is fully loaded, then resolve.
+        if block_on(self.resource.clone()).is_ok() {
+            block_on(
+                self.resource
+                    .data_ref()
+                    .get_scene_mut()
+                    .resolve(self.resource_manager.clone()),
+            );
 
-        for child in self.children.iter() {
-            child.resolve();
+            for child in self.children.iter() {
+                child.resolve();
+            }
         }
     }
 }
@@ -202,19 +418,13 @@ pub struct EngineInitParams<'a> {
     pub vsync: bool,
 }
 
-fn process_node<T>(
-    scene: &mut Scene,
-    dt: f32,
-    handle: Handle<Node>,
-    plugins: &mut [Box<dyn Plugin>],
-    resource_manager: &ResourceManager,
-    func: &mut T,
-) where
-    T: FnMut(&mut Script, ScriptContext),
+fn process_node<T>(context: &mut ScriptContext, func: &mut T)
+where
+    T: FnMut(&mut Script, &mut ScriptContext),
 {
     // Take a script from node. We're temporarily taking ownership over script
     // instance.
-    let mut script = match scene.graph.try_get_mut(handle) {
+    let mut script = match context.scene.graph.try_get_mut(context.handle) {
         Some(node) => {
             if let Some(script) = node.script.take() {
                 script
@@ -229,23 +439,11 @@ fn process_node<T>(
         }
     };
 
-    // Find respective plugin.
-    if let Some(plugin) = plugins.iter_mut().find(|p| p.id() == script.plugin_uuid()) {
-        // Form the context with all available data.
-        let context = ScriptContext {
-            dt,
-            plugin: &mut **plugin,
-            handle,
-            scene,
-            resource_manager,
-        };
-
-        func(&mut script, context);
-    }
+    func(&mut script, context);
 
     // Put the script back to the node. We must do a checked borrow, because it is possible
     // that the node is already destroyed by script logic.
-    if let Some(node) = scene.graph.try_get_mut(handle) {
+    if let Some(node) = context.scene.graph.try_get_mut(context.handle) {
         node.script = Some(script);
     }
 }
@@ -255,15 +453,24 @@ pub(crate) fn process_scripts<T>(
     plugins: &mut [Box<dyn Plugin>],
     resource_manager: &ResourceManager,
     dt: f32,
+    elapsed_time: f32,
     mut func: T,
 ) where
-    T: FnMut(&mut Script, ScriptContext),
+    T: FnMut(&mut Script, &mut ScriptContext),
 {
-    // Start processing by going through the graph and processing nodes one-by-one.
-    for node_index in 0..scene.graph.capacity() {
-        let handle = scene.graph.handle_from_index(node_index);
+    let mut context = ScriptContext {
+        dt,
+        elapsed_time,
+        plugins,
+        handle: Default::default(),
+        scene,
+        resource_manager,
+    };
 
-        process_node(scene, dt, handle, plugins, resource_manager, &mut func);
+    for node_index in 0..context.scene.graph.capacity() {
+        context.handle = context.scene.graph.handle_from_index(node_index);
+
+        process_node(&mut context, &mut func);
     }
 }
 
@@ -409,9 +616,10 @@ impl Engine {
             window,
             plugins: Default::default(),
             serialization_context: node_constructors,
-            scripted_scenes: Default::default(),
+            script_processor: Default::default(),
             plugins_enabled: false,
             plugin_constructors: Default::default(),
+            elapsed_time: 0.0,
         })
     }
 
@@ -426,6 +634,13 @@ impl Engine {
         Ok(())
     }
 
+    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// this value is **not** guaranteed to match real time. A user can change delta time with
+    /// which the engine "ticks" and this delta time affects elapsed time.
+    pub fn elapsed_time(&self) -> f32 {
+        self.elapsed_time
+    }
+
     /// Returns reference to main window. Could be useful to set fullscreen mode, change
     /// size of window, its title, etc.
     #[inline]
@@ -436,8 +651,18 @@ impl Engine {
     /// Performs single update tick with given time delta. Engine internally will perform update
     /// of all scenes, sub-systems, user interface, etc. Must be called in order to get engine
     /// functioning.
-    pub fn update(&mut self, dt: f32, control_flow: &mut ControlFlow) {
-        self.pre_update(dt, control_flow);
+    ///
+    /// ## Parameters
+    ///
+    /// `lag` - is a reference to time accumulator, that holds remaining amount of time that should be used
+    /// to update a plugin. A caller splits `lag` into multiple sub-steps using `dt` and thus stabilizes
+    /// update rate. The main use of this variable, is to be able to reset `lag` when you doing some heavy
+    /// calculations in a your game loop (i.e. loading a new level) so the engine won't try to "catch up" with
+    /// all the time that was spent in heavy calculation. The engine does **not** use this variable itself,
+    /// but the plugins attach may use it, that's why you need to provide it. If you don't use plugins, then
+    /// put `&mut 0.0` here.
+    pub fn update(&mut self, dt: f32, control_flow: &mut ControlFlow, lag: &mut f32) {
+        self.pre_update(dt, control_flow, lag);
         self.post_update(dt);
     }
 
@@ -445,7 +670,17 @@ impl Engine {
     ///
     /// Normally, this is called from `Engine::update()`.
     /// You should only call this manually if you don't use that method.
-    pub fn pre_update(&mut self, dt: f32, control_flow: &mut ControlFlow) {
+    ///
+    /// ## Parameters
+    ///
+    /// `lag` - is a reference to time accumulator, that holds remaining amount of time that should be used
+    /// to update a plugin. A caller splits `lag` into multiple sub-steps using `dt` and thus stabilizes
+    /// update rate. The main use of this variable, is to be able to reset `lag` when you doing some heavy
+    /// calculations in a your game loop (i.e. loading a new level) so the engine won't try to "catch up" with
+    /// all the time that was spent in heavy calculation. The engine does **not** use this variable itself,
+    /// but the plugins attach may use it, that's why you need to provide it. If you don't use plugins, then
+    /// put `&mut 0.0` here.
+    pub fn pre_update(&mut self, dt: f32, control_flow: &mut ControlFlow, lag: &mut f32) {
         let inner_size = self.get_window().inner_size();
         let window_size = Vector2::new(inner_size.width as f32, inner_size.height as f32);
 
@@ -465,8 +700,8 @@ impl Engine {
             scene.update(frame_size, dt);
         }
 
-        self.update_plugins(dt, control_flow);
-        self.update_scripted_scene_scripts(dt);
+        self.update_plugins(dt, control_flow, lag);
+        self.handle_scripts(dt);
     }
 
     /// Performs post update for the engine.
@@ -480,17 +715,41 @@ impl Engine {
         let time = instant::Instant::now();
         self.user_interface.update(window_size, dt);
         self.ui_time = instant::Instant::now() - time;
-
-        self.handle_script_messages();
+        self.elapsed_time += dt;
     }
 
-    fn update_plugins(&mut self, dt: f32, control_flow: &mut ControlFlow) {
+    /// Returns true if the scene is registered for script processing.
+    pub fn has_scripted_scene(&self, scene: Handle<Scene>) -> bool {
+        self.script_processor.has_scripted_scene(scene)
+    }
+
+    /// Registers a scene for script processing.
+    pub fn register_scripted_scene(&mut self, scene: Handle<Scene>) {
+        self.script_processor.register_scripted_scene(
+            scene,
+            &mut self.scenes,
+            &self.resource_manager,
+        )
+    }
+
+    fn handle_scripts(&mut self, dt: f32) {
+        self.script_processor.handle_scripts(
+            &mut self.scenes,
+            &mut self.plugins,
+            &self.resource_manager,
+            dt,
+            self.elapsed_time,
+        );
+    }
+
+    fn update_plugins(&mut self, dt: f32, control_flow: &mut ControlFlow, lag: &mut f32) {
         if self.plugins_enabled {
             let mut context = PluginContext {
                 scenes: &mut self.scenes,
                 resource_manager: &self.resource_manager,
                 renderer: &mut self.renderer,
                 dt,
+                lag,
                 user_interface: &mut self.user_interface,
                 serialization_context: &self.serialization_context,
                 window: get_window!(self),
@@ -509,6 +768,7 @@ impl Engine {
                     resource_manager: &self.resource_manager,
                     renderer: &mut self.renderer,
                     dt,
+                    lag,
                     user_interface: &mut self.user_interface,
                     serialization_context: &self.serialization_context,
                     window: get_window!(self),
@@ -529,6 +789,7 @@ impl Engine {
         event: &Event<()>,
         dt: f32,
         control_flow: &mut ControlFlow,
+        lag: &mut f32,
     ) {
         if self.plugins_enabled {
             for plugin in self.plugins.iter_mut() {
@@ -539,6 +800,7 @@ impl Engine {
                         resource_manager: &self.resource_manager,
                         renderer: &mut self.renderer,
                         dt,
+                        lag,
                         user_interface: &mut self.user_interface,
                         serialization_context: &self.serialization_context,
                         window: get_window!(self),
@@ -548,101 +810,6 @@ impl Engine {
                     },
                     control_flow,
                 );
-            }
-        }
-    }
-
-    /// Correctly handle all script instances. It is called automatically once per frame, but
-    /// you can call it manually if you want immediate script message processing.
-    ///
-    /// # Motivation
-    ///
-    /// There is no way to initialize or destruct script instances on demand, that's why script
-    /// initialization and destruction is deferred. It is called in controlled environment that
-    /// has unique access to all required components thus solving borrowing issues.
-    fn handle_script_messages(&mut self) {
-        for (handle, scene) in self.scenes.pair_iter_mut() {
-            if self.scripted_scenes.contains(&handle) {
-                scene.handle_script_messages(&mut self.plugins, &self.resource_manager);
-            } else {
-                scene.discard_script_messages();
-            }
-        }
-
-        // Process scripts from destroyed scenes.
-        for (handle, mut detached_scene) in self.scenes.destruction_list.drain(..) {
-            // Destroy every queued script instances first.
-            if self.scripted_scenes.contains(&handle) {
-                detached_scene.handle_script_messages(&mut self.plugins, &self.resource_manager);
-
-                // Destroy every script instance from nodes that were still alive.
-                for node_index in 0..detached_scene.graph.capacity() {
-                    let node_handle = detached_scene.graph.handle_from_index(node_index);
-
-                    if let Some(mut script) = detached_scene
-                        .graph
-                        .try_get_mut(node_handle)
-                        .and_then(|node| node.script.take())
-                    {
-                        if let Some(plugin) = self
-                            .plugins
-                            .iter_mut()
-                            .find(|p| p.id() == script.plugin_uuid())
-                        {
-                            script.on_deinit(ScriptDeinitContext {
-                                plugin: &mut **plugin,
-                                resource_manager: &self.resource_manager,
-                                scene: &mut detached_scene,
-                                node_handle,
-                            })
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn update_scripted_scene_scripts(&mut self, dt: f32) {
-        for &scene in self.scripted_scenes.iter() {
-            if let Some(scene) = self.scenes.try_get_mut(scene) {
-                // Subscribe to graph events, we're interested in newly added nodes.
-                // Subscription is weak and will break after this method automatically.
-                let (tx, rx) = mpsc::channel();
-                scene.graph.event_broadcaster.subscribe(tx);
-
-                process_scripts(
-                    scene,
-                    &mut self.plugins,
-                    &self.resource_manager,
-                    dt,
-                    |script, context| script.on_update(context),
-                );
-
-                // Initialize and update any newly added nodes, this will ensure that any newly created instances
-                // are correctly processed.
-                while let Ok(event) = rx.try_recv() {
-                    if let GraphEvent::Added(node) = event {
-                        // Init first.
-                        process_node(
-                            scene,
-                            dt,
-                            node,
-                            &mut self.plugins,
-                            &self.resource_manager,
-                            &mut |script, context| script.on_init(context),
-                        );
-
-                        // Then update.
-                        process_node(
-                            scene,
-                            dt,
-                            node,
-                            &mut self.plugins,
-                            &self.resource_manager,
-                            &mut |script, context| script.on_update(context),
-                        );
-                    }
-                }
             }
         }
     }
@@ -660,69 +827,20 @@ impl Engine {
         scene: Handle<Scene>,
         dt: f32,
     ) {
-        process_scripts(
-            &mut self.scenes[scene],
-            &mut self.plugins,
-            &self.resource_manager,
-            dt,
-            |script, context| script.on_os_event(event, context),
-        )
-    }
-
-    /// Initializes every script in the scene.
-    ///
-    ///
-    /// # Important notes
-    ///
-    /// This method is intended to be used by the editor and game runner. If you're using the
-    /// engine as a framework, then you should not call this method because you'll most likely
-    /// do something wrong.
-    pub(crate) fn initialize_scene_scripts(&mut self, scene: Handle<Scene>, dt: f32) {
-        // Wait until all resources are fully loaded (or failed to load). It is needed
-        // because some scripts may use resources and any attempt to use non loaded resource
-        // will result in panic.
-        let wait_context = self
-            .resource_manager
-            .state()
-            .containers_mut()
-            .wait_concurrent();
-        block_on(wait_context.wait_concurrent());
-
-        if let Some(scene) = self.scenes.try_get_mut(scene) {
-            // Subscribe to graph events, we're interested in newly added nodes.
-            // Subscription is weak and will break after this method automatically.
-            let (tx, rx) = mpsc::channel();
-            scene.graph.event_broadcaster.subscribe(tx);
-
+        let scene = &mut self.scenes[scene];
+        if scene.enabled {
             process_scripts(
                 scene,
                 &mut self.plugins,
                 &self.resource_manager,
                 dt,
-                |script, context| script.on_init(context),
-            );
-
-            // Initialize any newly added nodes, this will ensure that any newly created instances
-            // are correctly processed.
-            while let Ok(event) = rx.try_recv() {
-                if let GraphEvent::Added(node) = event {
-                    let wait_context = self
-                        .resource_manager
-                        .state()
-                        .containers_mut()
-                        .wait_concurrent();
-                    block_on(wait_context.wait_concurrent());
-
-                    process_node(
-                        scene,
-                        dt,
-                        node,
-                        &mut self.plugins,
-                        &self.resource_manager,
-                        &mut |script, context| script.on_init(context),
-                    );
-                }
-            }
+                self.elapsed_time,
+                |script, context| {
+                    if script.initialized {
+                        script.on_os_event(event, context);
+                    }
+                },
+            )
         }
     }
 
@@ -800,6 +918,7 @@ impl Engine {
                             resource_manager: &self.resource_manager,
                             renderer: &mut self.renderer,
                             dt: 0.0,
+                            lag: &mut 0.0,
                             user_interface: &mut self.user_interface,
                             serialization_context: &self.serialization_context,
                             window: get_window!(self),
@@ -810,7 +929,7 @@ impl Engine {
                     ));
                 }
             } else {
-                self.handle_script_messages();
+                self.handle_scripts(0.0);
 
                 for mut plugin in self.plugins.drain(..) {
                     // Deinit plugin first.
@@ -819,6 +938,7 @@ impl Engine {
                         resource_manager: &self.resource_manager,
                         renderer: &mut self.renderer,
                         dt: 0.0,
+                        lag: &mut 0.0,
                         user_interface: &mut self.user_interface,
                         serialization_context: &self.serialization_context,
                         window: get_window!(self),
@@ -834,7 +954,7 @@ impl Engine {
     /// Adds new plugin plugin constructor.
     pub fn add_plugin_constructor<P>(&mut self, constructor: P)
     where
-        P: PluginConstructor + TypeUuidProvider + 'static,
+        P: PluginConstructor + 'static,
     {
         constructor.register(PluginRegistrationContext {
             serialization_context: &self.serialization_context,
@@ -861,5 +981,206 @@ impl Drop for Engine {
 
         // Finally disable plugins.
         self.enable_plugins(Default::default(), false);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        core::{
+            inspect::prelude::*, pool::Handle, reflect::Reflect, uuid::Uuid, visitor::prelude::*,
+        },
+        engine::{resource_manager::ResourceManager, ScriptProcessor},
+        impl_component_provider,
+        scene::{base::BaseBuilder, node::Node, pivot::PivotBuilder, Scene, SceneContainer},
+        script::{Script, ScriptContext, ScriptDeinitContext, ScriptTrait},
+    };
+    use std::sync::mpsc::{self, Sender, TryRecvError};
+
+    #[derive(PartialEq, Eq, Clone, Debug)]
+    enum Event {
+        Initialized(Handle<Node>),
+        Started(Handle<Node>),
+        Updated(Handle<Node>),
+        Destroyed(Handle<Node>),
+    }
+
+    #[derive(Debug, Clone, Reflect, Inspect, Visit)]
+    struct MyScript {
+        #[reflect(hidden)]
+        #[inspect(skip)]
+        #[visit(skip)]
+        sender: Sender<Event>,
+        spawned: bool,
+    }
+
+    impl_component_provider!(MyScript);
+
+    impl ScriptTrait for MyScript {
+        fn on_init(&mut self, ctx: &mut ScriptContext) {
+            self.sender.send(Event::Initialized(ctx.handle)).unwrap();
+
+            // Spawn new entity with script.
+            let handle =
+                PivotBuilder::new(BaseBuilder::new().with_script(Script::new(MySubScript {
+                    sender: self.sender.clone(),
+                })))
+                .build(&mut ctx.scene.graph);
+            assert_eq!(handle, Handle::new(2, 1));
+        }
+
+        fn on_start(&mut self, ctx: &mut ScriptContext) {
+            self.sender.send(Event::Started(ctx.handle)).unwrap();
+
+            // Spawn new entity with script.
+            let handle =
+                PivotBuilder::new(BaseBuilder::new().with_script(Script::new(MySubScript {
+                    sender: self.sender.clone(),
+                })))
+                .build(&mut ctx.scene.graph);
+            assert_eq!(handle, Handle::new(3, 1));
+        }
+
+        fn on_deinit(&mut self, ctx: &mut ScriptDeinitContext) {
+            self.sender.send(Event::Destroyed(ctx.node_handle)).unwrap();
+        }
+
+        fn on_update(&mut self, ctx: &mut ScriptContext) {
+            self.sender.send(Event::Updated(ctx.handle)).unwrap();
+
+            if !self.spawned {
+                // Spawn new entity with script.
+                PivotBuilder::new(BaseBuilder::new().with_script(Script::new(MySubScript {
+                    sender: self.sender.clone(),
+                })))
+                .build(&mut ctx.scene.graph);
+
+                self.spawned = true;
+            }
+        }
+
+        fn id(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+    }
+
+    #[derive(Debug, Clone, Reflect, Inspect, Visit)]
+    struct MySubScript {
+        #[reflect(hidden)]
+        #[inspect(skip)]
+        #[visit(skip)]
+        sender: Sender<Event>,
+    }
+
+    impl_component_provider!(MySubScript);
+
+    impl ScriptTrait for MySubScript {
+        fn on_init(&mut self, ctx: &mut ScriptContext) {
+            self.sender.send(Event::Initialized(ctx.handle)).unwrap();
+        }
+
+        fn on_start(&mut self, ctx: &mut ScriptContext) {
+            self.sender.send(Event::Started(ctx.handle)).unwrap();
+        }
+
+        fn on_deinit(&mut self, ctx: &mut ScriptDeinitContext) {
+            self.sender.send(Event::Destroyed(ctx.node_handle)).unwrap();
+        }
+
+        fn on_update(&mut self, ctx: &mut ScriptContext) {
+            self.sender.send(Event::Updated(ctx.handle)).unwrap();
+        }
+
+        fn id(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+    }
+
+    #[test]
+    fn test_order() {
+        let resource_manager = ResourceManager::new(Default::default());
+        let mut scene = Scene::new();
+
+        let (tx, rx) = mpsc::channel();
+
+        let node_handle =
+            PivotBuilder::new(BaseBuilder::new().with_script(Script::new(MyScript {
+                sender: tx,
+                spawned: false,
+            })))
+            .build(&mut scene.graph);
+        assert_eq!(node_handle, Handle::new(1, 1));
+
+        let mut scene_container = SceneContainer::new(Default::default());
+
+        let scene_handle = scene_container.add(scene);
+
+        let mut script_processor = ScriptProcessor::default();
+
+        script_processor.register_scripted_scene(
+            scene_handle,
+            &mut scene_container,
+            &resource_manager,
+        );
+
+        let handle_on_init = Handle::new(2, 1);
+        let handle_on_start = Handle::new(3, 1);
+        let handle_on_update1 = Handle::new(4, 1);
+
+        for iteration in 0..3 {
+            script_processor.handle_scripts(
+                &mut scene_container,
+                &mut Default::default(),
+                &resource_manager,
+                0.0,
+                0.0,
+            );
+
+            match iteration {
+                0 => {
+                    assert_eq!(rx.try_recv(), Ok(Event::Initialized(node_handle)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Initialized(handle_on_init)));
+
+                    assert_eq!(rx.try_recv(), Ok(Event::Started(node_handle)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Started(handle_on_init)));
+
+                    assert_eq!(rx.try_recv(), Ok(Event::Initialized(handle_on_start)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Started(handle_on_start)));
+
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(node_handle)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(handle_on_init)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(handle_on_start)));
+
+                    assert_eq!(rx.try_recv(), Ok(Event::Initialized(handle_on_update1)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Started(handle_on_update1)));
+
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(handle_on_update1)));
+                }
+                1 => {
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(node_handle)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(handle_on_init)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(handle_on_start)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Updated(handle_on_update1)));
+                    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+                    // Now destroy every node with script, next iteration should correctly destroy attached scripts.
+                    let scene = &mut scene_container[scene_handle];
+                    scene.remove_node(node_handle);
+                    scene.remove_node(handle_on_init);
+                    scene.remove_node(handle_on_start);
+                    scene.remove_node(handle_on_update1);
+                }
+                2 => {
+                    assert_eq!(rx.try_recv(), Ok(Event::Destroyed(node_handle)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Destroyed(handle_on_init)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Destroyed(handle_on_start)));
+                    assert_eq!(rx.try_recv(), Ok(Event::Destroyed(handle_on_update1)));
+
+                    // Every instance holding sender died, so receiver is disconnected from sender.
+                    assert_eq!(rx.try_recv(), Err(TryRecvError::Disconnected));
+                }
+                _ => (),
+            }
+        }
     }
 }

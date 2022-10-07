@@ -4,9 +4,7 @@
 
 #![warn(missing_docs)]
 
-use crate::scene::graph::map::NodeHandleMap;
 use crate::{
-    core::variable::InheritError,
     core::{
         algebra::{Matrix4, Vector2},
         inspect::{Inspect, PropertyInfo},
@@ -151,22 +149,11 @@ pub trait NodeTrait: BaseNodeTrait + Reflect + Inspect + Visit {
     /// its world bounding box without additional information.
     fn world_bounding_box(&self) -> AxisAlignedBoundingBox;
 
-    /// Prefab inheritance resolving.
-    fn inherit(&mut self, parent: &Node) -> Result<(), InheritError>;
-
-    /// Resets inheritable property flags after cloning the node.
-    fn reset_inheritable_properties(&mut self);
-
     /// Restores resource handles, it is used to re-map "shallow" resource handles to fully loaded
     /// ones after the scene is loaded in the engine. This is needed because when the engine
     /// serializes resource handle, it just writes a path to the resource, not its content. So we
     /// must get real resource after the node is loaded from a scene.
     fn restore_resources(&mut self, resource_manager: ResourceManager);
-
-    /// Re-maps internal handles after cloning or property inheritance. It is needed because a node
-    /// might store handles to other nodes in scene graph, for example a skinned mesh stores handles
-    /// to bones and when we copy the mesh, handles must be mapped to respective copies of each bone.
-    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap);
 
     /// Returns actual type id. It will be used for serialization, the type will be saved together
     /// with node's data allowing you to create correct node instance on deserialization.

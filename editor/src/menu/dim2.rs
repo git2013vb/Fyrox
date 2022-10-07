@@ -1,10 +1,9 @@
-use crate::{menu::create_menu_item, scene::commands::graph::AddNodeCommand, Message};
+use crate::menu::create_menu_item;
 use fyrox::{
     core::pool::Handle,
     gui::{menu::MenuItemMessage, message::UiMessage, BuildContext, UiNode},
     scene::{base::BaseBuilder, dim2::rectangle::RectangleBuilder, node::Node},
 };
-use std::sync::mpsc::Sender;
 
 pub struct Dim2Menu {
     pub menu: Handle<UiNode>,
@@ -18,7 +17,7 @@ impl Dim2Menu {
         let menu = create_menu_item(
             "2D",
             vec![{
-                create_sprite = create_menu_item("Rectangle", vec![], ctx);
+                create_sprite = create_menu_item("Rectangle (2D Sprite)", vec![], ctx);
                 create_sprite
             }],
             ctx,
@@ -31,20 +30,17 @@ impl Dim2Menu {
         }
     }
 
-    pub fn handle_ui_message(
-        &mut self,
-        message: &UiMessage,
-        sender: &Sender<Message>,
-        parent: Handle<Node>,
-    ) {
+    pub fn handle_ui_message(&mut self, message: &UiMessage) -> Option<Node> {
         if let Some(MenuItemMessage::Click) = message.data::<MenuItemMessage>() {
             if message.destination() == self.create_sprite {
                 let node =
-                    RectangleBuilder::new(BaseBuilder::new().with_name("Sprite 2D")).build_node();
-                sender
-                    .send(Message::do_scene_command(AddNodeCommand::new(node, parent)))
-                    .unwrap();
+                    RectangleBuilder::new(BaseBuilder::new().with_name("Sprite (2D)")).build_node();
+                Some(node)
+            } else {
+                None
             }
+        } else {
+            None
         }
     }
 }

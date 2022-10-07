@@ -7,13 +7,15 @@ pub mod plane;
 pub mod ray;
 pub mod triangulator;
 
-use crate::algebra::{RealField, SimdRealField};
 use crate::{
-    algebra::{Matrix3, Matrix4, Scalar, UnitQuaternion, Vector2, Vector3},
+    algebra::{
+        Matrix3, Matrix4, RealField, Scalar, SimdRealField, UnitQuaternion, Vector2, Vector3,
+    },
+    inspect::prelude::*,
     math::ray::IntersectionResult,
     num_traits::{NumAssign, Zero},
     reflect::Reflect,
-    visitor::{Visit, VisitResult, Visitor},
+    visitor::prelude::*,
 };
 use std::ops::{Index, IndexMut};
 
@@ -47,6 +49,16 @@ where
             position: Vector2::new(x, y),
             size: Vector2::new(w, h),
         }
+    }
+
+    pub fn with_position(mut self, position: Vector2<T>) -> Self {
+        self.position = position;
+        self
+    }
+
+    pub fn with_size(mut self, size: Vector2<T>) -> Self {
+        self.size = size;
+        self
     }
 
     #[must_use = "this method creates new instance of rect"]
@@ -836,7 +848,7 @@ pub fn get_closest_point_triangle_set<P: PositionProvider>(
     closest_index
 }
 
-#[derive(Debug, PartialEq, Visit)]
+#[derive(Debug, PartialEq, Visit, Reflect, Inspect, Clone)]
 pub struct SmoothAngle {
     /// Current angle in radians.
     pub angle: f32,

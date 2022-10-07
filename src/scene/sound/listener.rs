@@ -4,7 +4,6 @@
 //! See [`Listener`] docs for more info.
 
 use crate::{
-    core::variable::InheritError,
     core::{
         inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext},
@@ -16,7 +15,7 @@ use crate::{
     engine::resource_manager::ResourceManager,
     scene::{
         base::{Base, BaseBuilder},
-        graph::{map::NodeHandleMap, Graph},
+        graph::Graph,
         node::{Node, NodeTrait, SyncContext, TypeUuidProvider},
     },
 };
@@ -77,21 +76,8 @@ impl NodeTrait for Listener {
         self.base.world_bounding_box()
     }
 
-    // Prefab inheritance resolving.
-    fn inherit(&mut self, parent: &Node) -> Result<(), InheritError> {
-        self.base.inherit_properties(parent)
-    }
-
-    fn reset_inheritable_properties(&mut self) {
-        self.base.reset_inheritable_properties();
-    }
-
     fn restore_resources(&mut self, resource_manager: ResourceManager) {
         self.base.restore_resources(resource_manager);
-    }
-
-    fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
-        self.base.remap_handles(old_new_mapping);
     }
 
     fn id(&self) -> Uuid {
@@ -137,9 +123,10 @@ impl ListenerBuilder {
 
 #[cfg(test)]
 mod test {
+    use crate::core::reflect::Reflect;
+    use crate::core::variable::try_inherit_properties;
     use crate::scene::{
         base::{test::check_inheritable_properties_equality, BaseBuilder},
-        node::NodeTrait,
         sound::listener::{Listener, ListenerBuilder},
     };
 
@@ -149,7 +136,7 @@ mod test {
 
         let mut child = ListenerBuilder::new(BaseBuilder::new()).build_listener();
 
-        child.inherit(&parent).unwrap();
+        try_inherit_properties(child.as_reflect_mut(), parent.as_reflect()).unwrap();
 
         let parent = parent.cast::<Listener>().unwrap();
 

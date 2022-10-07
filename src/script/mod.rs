@@ -13,8 +13,8 @@ use crate::{
     engine::resource_manager::ResourceManager,
     event::Event,
     plugin::Plugin,
-    scene::{graph::map::NodeHandleMap, node::Node, DirectlyInheritableEntity, Scene},
-    utils::component::ComponentProvider,
+    scene::{node::Node, Scene},
+    utils::{component::ComponentProvider, log::Log},
 };
 use std::{
     any::{Any, TypeId},
@@ -25,33 +25,17 @@ use std::{
 pub mod constructor;
 
 /// Base script trait is used to automatically implement some trait to reduce amount of boilerplate code.
-pub trait BaseScript:
-    Visit + Inspect + Reflect + Send + Debug + DirectlyInheritableEntity + 'static
-{
+pub trait BaseScript: Visit + Inspect + Reflect + Send + Debug + 'static {
     /// Creates exact copy of the script.
     fn clone_box(&self) -> Box<dyn ScriptTrait>;
-
-    /// Returns self as DirectlyInheritableEntity
-    fn as_directly_inheritable_ref(&self) -> &dyn DirectlyInheritableEntity;
-
-    /// Returns self as DirectlyInheritableEntity
-    fn as_directly_inheritable_mut(&mut self) -> &mut dyn DirectlyInheritableEntity;
 }
 
 impl<T> BaseScript for T
 where
-    T: Clone + ScriptTrait + Any + DirectlyInheritableEntity,
+    T: Clone + ScriptTrait + Any,
 {
     fn clone_box(&self) -> Box<dyn ScriptTrait> {
         Box::new(self.clone())
-    }
-
-    fn as_directly_inheritable_ref(&self) -> &dyn DirectlyInheritableEntity {
-        self
-    }
-
-    fn as_directly_inheritable_mut(&mut self) -> &mut dyn DirectlyInheritableEntity {
-        self
     }
 }
 
@@ -60,10 +44,15 @@ pub struct ScriptContext<'a, 'b> {
     /// Amount of time that passed from last call. It has valid values only when called from `on_update`.
     pub dt: f32,
 
+    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// this value is **not** guaranteed to match real time. A user can change delta time with
+    /// which the engine "ticks" and this delta time affects elapsed time.
+    pub elapsed_time: f32,
+
     /// A reference to the plugin which the script instance belongs to. You can use it to access plugin data
     /// inside script methods. For example you can store some "global" data in the plugin - for example a
     /// controls configuration, some entity managers and so on.
-    pub plugin: &'a mut dyn Plugin,
+    pub plugins: &'a mut [Box<dyn Plugin>],
 
     /// Handle of a node to which the script instance belongs to. To access the node itself use `scene` field:
     ///
@@ -85,10 +74,15 @@ pub struct ScriptContext<'a, 'b> {
 
 /// A set of data that will be passed to a script instance just before its destruction.
 pub struct ScriptDeinitContext<'a, 'b> {
+    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// this value is **not** guaranteed to match real time. A user can change delta time with
+    /// which the engine "ticks" and this delta time affects elapsed time.
+    pub elapsed_time: f32,
+
     /// A reference to the plugin which the script instance belongs to. You can use it to access plugin data
     /// inside script methods. For example you can store some "global" data in the plugin - for example a
     /// controls configuration, some entity managers and so on.
-    pub plugin: &'a mut dyn Plugin,
+    pub plugins: &'a mut [Box<dyn Plugin>],
 
     /// A reference to resource manager, use it to load resources.
     pub resource_manager: &'a ResourceManager,
@@ -108,53 +102,37 @@ pub trait ScriptTrait: BaseScript + ComponentProvider {
     /// The method is called when the script wasn't initialized yet. It is guaranteed to be called once,
     /// and before any other methods of the script.
     ///
-    /// # Editor-specific information
+    /// # Important
     ///
-    /// In the editor, the method will be called on entering the play mode.
-    fn on_init(&mut self, #[allow(unused_variables)] context: ScriptContext) {}
+    /// The method **will not** be called in case if you serialized initialized script instance and then
+    /// loaded the instance. Internal flag will tell the engine that the script is initialized and this
+    /// method **will not** be called. This is intentional design decision to be able to create save files
+    /// in games. If you need a method that will be called in any case, use [`ScriptTrait::on_start`].
+    fn on_init(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) {}
+
+    /// The method is called after [`ScriptTrait::on_init`], but in separate pass, which means that all
+    /// script instances are already initialized. However, if implementor of this method creates a new
+    /// node with a script, there will be a second pass of initialization. The method is guaranteed to
+    /// be called once.
+    fn on_start(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) {}
 
     /// The method is called when the script is about to be destroyed. It is guaranteed to be called last.
-    ///
-    /// # Editor-specific information
-    ///
-    /// In the editor, the method will be called before leaving the play mode.
-    fn on_deinit(&mut self, #[allow(unused_variables)] context: ScriptDeinitContext) {}
+    fn on_deinit(&mut self, #[allow(unused_variables)] ctx: &mut ScriptDeinitContext) {}
 
     /// Called when there is an event from the OS. The method allows you to "listen" for events
     /// coming from the main window of your game (or the editor if the game running inside the
     /// editor.
-    ///
-    /// # Editor-specific information
-    ///
-    /// When the game running inside the editor, every event related to position/size changes will
-    /// be modified to have position/size of the preview frame of the editor, not the main window.
-    /// For end user this means that the game will function as if it was run in standalone mode.
     fn on_os_event(
         &mut self,
         #[allow(unused_variables)] event: &Event<()>,
-        #[allow(unused_variables)] context: ScriptContext,
+        #[allow(unused_variables)] ctx: &mut ScriptContext,
     ) {
     }
 
     /// Performs a single update tick of the script. The method may be called multiple times per
     /// frame, but it is guaranteed that the rate of call is stable and usually it will be called
     /// 60 times per second (this may change in future releases).
-    ///
-    /// # Editor-specific information
-    ///
-    /// Does not work in editor mode, works only in play mode.
-    fn on_update(&mut self, #[allow(unused_variables)] context: ScriptContext) {}
-
-    /// Called right after the parent node was copied, giving you the ability to remap handles to
-    /// nodes stored inside of your script.
-    ///
-    /// # Motivation
-    ///
-    /// Imagine that you have a character controller script that contains handles to some other
-    /// nodes in the scene, for example a collider. When you copy the node with the script, you
-    /// want the copy to contain references to respective copies, not the original objects.
-    /// The method allows you to do exactly this.
-    fn remap_handles(&mut self, #[allow(unused_variables)] old_new_mapping: &NodeHandleMap) {}
+    fn on_update(&mut self, #[allow(unused_variables)] ctx: &mut ScriptContext) {}
 
     /// Allows you to restore resources after deserialization.
     ///
@@ -186,7 +164,7 @@ pub trait ScriptTrait: BaseScript + ComponentProvider {
     ///     core::reflect::Reflect,
     ///     core::uuid::Uuid,
     ///     script::ScriptTrait,
-    ///     core::uuid::uuid, impl_component_provider, impl_directly_inheritable_entity_trait
+    ///     core::uuid::uuid, impl_component_provider
     /// };
     ///
     /// #[derive(Inspect, Reflect, Visit, Debug, Clone)]
@@ -203,77 +181,79 @@ pub trait ScriptTrait: BaseScript + ComponentProvider {
     /// }
     ///
     /// impl_component_provider!(MyScript);
-    /// impl_directly_inheritable_entity_trait!(MyScript;);
     ///
     /// impl ScriptTrait for MyScript {
     ///     fn id(&self) -> Uuid {
     ///         Self::type_uuid()
     ///     }
-    ///
-    ///    # fn plugin_uuid(&self) -> Uuid {
-    ///    #     todo!()
-    ///    # }
     /// }
     /// ```
     fn id(&self) -> Uuid;
-
-    /// Returns parent plugin UUID. It is used to find respective plugin when processing scripts.
-    /// The engine makes an attempt to find a plugin by comparing type uuids and if one found,
-    /// it is passed on ScriptContext.
-    fn plugin_uuid(&self) -> Uuid;
 }
 
 /// A wrapper for actual script instance internals, it used by the engine.
 #[derive(Debug)]
-pub struct Script(pub Box<dyn ScriptTrait>);
+pub struct Script {
+    instance: Box<dyn ScriptTrait>,
+    pub(crate) initialized: bool,
+    pub(crate) started: bool,
+}
 
 impl Reflect for Script {
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self.0.into_any()
+        self.instance.into_any()
     }
 
     fn as_any(&self) -> &dyn Any {
-        self.0.deref().as_any()
+        self.instance.deref().as_any()
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
-        self.0.deref_mut().as_any_mut()
+        self.instance.deref_mut().as_any_mut()
     }
 
     fn as_reflect(&self) -> &dyn Reflect {
-        self.0.deref().as_reflect()
+        self.instance.deref().as_reflect()
     }
 
     fn as_reflect_mut(&mut self) -> &mut dyn Reflect {
-        self.0.deref_mut().as_reflect_mut()
+        self.instance.deref_mut().as_reflect_mut()
     }
 
     fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
-        self.0.deref_mut().set(value)
+        self.instance.deref_mut().set(value)
     }
 
     fn field(&self, name: &str) -> Option<&dyn Reflect> {
-        self.0.deref().field(name)
+        self.instance.deref().field(name)
     }
 
     fn field_mut(&mut self, name: &str) -> Option<&mut dyn Reflect> {
-        self.0.deref_mut().field_mut(name)
+        self.instance.deref_mut().field_mut(name)
     }
 
     fn as_array(&self) -> Option<&dyn ReflectArray> {
-        self.0.deref().as_array()
+        self.instance.deref().as_array()
     }
 
     fn as_array_mut(&mut self) -> Option<&mut dyn ReflectArray> {
-        self.0.deref_mut().as_array_mut()
+        self.instance.deref_mut().as_array_mut()
     }
 
     fn as_list(&self) -> Option<&dyn ReflectList> {
-        self.0.deref().as_list()
+        self.instance.deref().as_list()
     }
 
     fn as_list_mut(&mut self) -> Option<&mut dyn ReflectList> {
-        self.0.deref_mut().as_list_mut()
+        self.instance.deref_mut().as_list_mut()
+    }
+
+    fn fields(&self) -> Vec<&dyn Reflect> {
+        self.instance.deref().fields()
+    }
+
+    fn fields_mut(&mut self) -> Vec<&mut dyn Reflect> {
+        self.instance.deref_mut().fields_mut()
     }
 }
 
@@ -281,61 +261,179 @@ impl Deref for Script {
     type Target = dyn ScriptTrait;
 
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        &*self.instance
     }
 }
 
 impl DerefMut for Script {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.0
+        &mut *self.instance
     }
 }
 
 impl Inspect for Script {
     fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        self.0.properties()
+        self.instance.properties()
     }
 }
 
 impl Visit for Script {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
-        self.0.visit(name, visitor)
+        let mut region_guard = visitor.enter_region(name)?;
+
+        // Check for new format first, this branch will fail only on attempt to deserialize
+        // scripts in old format.
+        if self.instance.visit("Data", &mut region_guard).is_ok() {
+            // Visit flags.
+            self.initialized.visit("Initialized", &mut region_guard)?;
+        } else {
+            Log::warn(format!(
+                "Unable to load script instance of id {} in new format! Trying to load in old format...",
+                self.id()
+            ));
+
+            // Leave region and try to load in old format.
+            drop(region_guard);
+
+            self.instance.visit(name, visitor)?;
+
+            Log::warn(format!(
+                "Script instance of id {} loaded successfully using compatibility loader! Resave the script!",
+                self.id()
+            ));
+        }
+
+        Ok(())
     }
 }
 
 impl Clone for Script {
     fn clone(&self) -> Self {
-        Self(self.0.clone_box())
+        Self {
+            instance: self.instance.clone_box(),
+            initialized: false,
+            started: false,
+        }
     }
 }
 
 impl Script {
     /// Creates new script wrapper using given script instance.
+    #[inline]
     pub fn new<T: ScriptTrait>(script_object: T) -> Self {
-        Self(Box::new(script_object))
+        Self {
+            instance: Box::new(script_object),
+            initialized: false,
+            started: false,
+        }
     }
 
     /// Performs downcasting to a particular type.
+    #[inline]
     pub fn cast<T: ScriptTrait>(&self) -> Option<&T> {
-        self.0.as_any().downcast_ref::<T>()
+        self.instance.as_any().downcast_ref::<T>()
     }
 
     /// Performs downcasting to a particular type.
+    #[inline]
     pub fn cast_mut<T: ScriptTrait>(&mut self) -> Option<&mut T> {
-        self.0.as_any_mut().downcast_mut::<T>()
+        self.instance.as_any_mut().downcast_mut::<T>()
     }
 
     /// Tries to borrow a component of given type.
+    #[inline]
     pub fn query_component_ref<T: Any>(&self) -> Option<&T> {
-        self.0
+        self.instance
             .query_component_ref(TypeId::of::<T>())
             .and_then(|c| c.downcast_ref())
     }
 
     /// Tries to borrow a component of given type.
+    #[inline]
     pub fn query_component_mut<T: Any>(&mut self) -> Option<&mut T> {
-        self.0
+        self.instance
             .query_component_mut(TypeId::of::<T>())
             .and_then(|c| c.downcast_mut())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        core::{
+            inspect::prelude::*, reflect::Reflect, uuid::Uuid, variable::try_inherit_properties,
+            variable::InheritableVariable, visitor::prelude::*,
+        },
+        impl_component_provider,
+        scene::base::Base,
+        script::{Script, ScriptTrait},
+    };
+
+    #[derive(Reflect, Inspect, Visit, Debug, Clone, Default)]
+    struct MyScript {
+        field: InheritableVariable<f32>,
+    }
+
+    impl_component_provider!(MyScript);
+
+    impl ScriptTrait for MyScript {
+        fn id(&self) -> Uuid {
+            todo!()
+        }
+    }
+
+    #[test]
+    fn test_script_property_inheritance_on_nodes() {
+        let mut child = Base::default();
+
+        child.script = Some(Script::new(MyScript {
+            field: InheritableVariable::new(1.23),
+        }));
+
+        let mut parent = Base::default();
+
+        parent.script = Some(Script::new(MyScript {
+            field: InheritableVariable::new(3.21),
+        }));
+
+        try_inherit_properties(child.as_reflect_mut(), parent.as_reflect()).unwrap();
+
+        assert_eq!(
+            *child.script().unwrap().cast::<MyScript>().unwrap().field,
+            3.21
+        );
+    }
+
+    #[test]
+    fn test_script_property_inheritance() {
+        let mut child = Script::new(MyScript {
+            field: InheritableVariable::new(1.23),
+        });
+
+        let parent = Script::new(MyScript {
+            field: InheritableVariable::new(3.21),
+        });
+
+        try_inherit_properties(child.as_reflect_mut(), parent.as_reflect()).unwrap();
+
+        assert_eq!(*child.cast::<MyScript>().unwrap().field, 3.21);
+    }
+
+    #[test]
+    fn test_script_property_inheritance_option() {
+        let mut child = Some(Script::new(MyScript {
+            field: InheritableVariable::new(1.23),
+        }));
+
+        let parent = Some(Script::new(MyScript {
+            field: InheritableVariable::new(3.21),
+        }));
+
+        try_inherit_properties(child.as_reflect_mut(), parent.as_reflect()).unwrap();
+
+        assert_eq!(
+            *child.as_ref().unwrap().cast::<MyScript>().unwrap().field,
+            3.21
+        );
     }
 }

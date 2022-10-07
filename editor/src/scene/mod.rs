@@ -1,3 +1,4 @@
+use crate::interaction::navmesh::data_model::NavmeshContainer;
 use crate::{
     audio::EffectSelection,
     camera::CameraController,
@@ -8,14 +9,14 @@ use crate::{
     scene::clipboard::Clipboard,
     settings::debugging::DebuggingSettings,
     world::graph::selection::GraphSelection,
-    GameEngine,
+    GameEngine, Settings,
 };
 use fyrox::{
     core::{
         algebra::{Matrix4, Point3, UnitQuaternion, Vector3},
         color::Color,
         math::{aabb::AxisAlignedBoundingBox, frustum::Frustum, Matrix4Ext, TriangleDefinition},
-        pool::{Handle, Pool},
+        pool::Handle,
         visitor::Visitor,
     },
     engine::Engine,
@@ -51,7 +52,7 @@ pub struct EditorScene {
     pub selection: Selection,
     pub clipboard: Clipboard,
     pub camera_controller: CameraController,
-    pub navmeshes: Pool<Navmesh>,
+    pub navmeshes: NavmeshContainer,
     pub preview_camera: Handle<Node>,
 }
 
@@ -62,15 +63,25 @@ pub fn is_scene_needs_to_be_saved(editor_scene: Option<&EditorScene>) -> bool {
 }
 
 impl EditorScene {
-    pub fn from_native_scene(mut scene: Scene, engine: &mut Engine, path: Option<PathBuf>) -> Self {
+    pub fn from_native_scene(
+        mut scene: Scene,
+        engine: &mut Engine,
+        path: Option<PathBuf>,
+        settings: &Settings,
+    ) -> Self {
         let root = PivotBuilder::new(BaseBuilder::new()).build(&mut scene.graph);
-        let camera_controller = CameraController::new(&mut scene.graph, root);
+        let camera_controller = CameraController::new(
+            &mut scene.graph,
+            root,
+            path.as_ref()
+                .and_then(|p| settings.camera.camera_settings.get(p)),
+        );
 
         // Freeze physics simulation in while editing scene by setting time step to zero.
-        scene.graph.physics.integration_parameters.dt = 0.0;
-        scene.graph.physics2d.integration_parameters.dt = 0.0;
+        scene.graph.physics.integration_parameters.dt = Some(0.0);
+        scene.graph.physics2d.integration_parameters.dt = Some(0.0);
 
-        let mut navmeshes = Pool::new();
+        let mut navmeshes = NavmeshContainer::default();
 
         for navmesh in scene.navmeshes.iter() {
             let _ = navmeshes.spawn(Navmesh {
@@ -181,7 +192,8 @@ impl EditorScene {
         }
     }
 
-    pub fn draw_debug(&mut self, engine: &mut Engine, settings: &DebuggingSettings) {
+    pub fn draw_auxiliary_geometry(&mut self, engine: &mut Engine, settings: &Settings) {
+        let debug_settings = &settings.debugging;
         let scene = &mut engine.scenes[self.scene];
 
         scene.drawing_context.clear_lines();
@@ -197,7 +209,7 @@ impl EditorScene {
             }
         }
 
-        if settings.show_physics {
+        if debug_settings.show_physics {
             scene.graph.physics.draw(&mut scene.drawing_context);
             scene.graph.physics2d.draw(&mut scene.drawing_context);
         }
@@ -320,8 +332,16 @@ impl EditorScene {
             &scene.graph,
             &mut scene.drawing_context,
             self,
-            settings,
+            debug_settings,
         );
+
+        let selection = if let Selection::Navmesh(ref selection) = self.selection {
+            Some(selection)
+        } else {
+            None
+        };
+        self.navmeshes
+            .draw(&mut scene.drawing_context, selection, &settings.navmesh);
     }
 }
 
