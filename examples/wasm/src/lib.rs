@@ -4,10 +4,7 @@
 //!
 //! Warning - Work in progress!
 
-use fyrox::engine::{EngineInitParams, SerializationContext};
-use fyrox::scene::sound::{SoundBuilder, Status};
 use fyrox::{
-    animation::Animation,
     core::{
         algebra::{Matrix4, UnitQuaternion, Vector3},
         color::Color,
@@ -17,7 +14,7 @@ use fyrox::{
         wasm_bindgen::{self, prelude::*},
     },
     dpi::LogicalSize,
-    engine::{resource_manager::ResourceManager, Engine},
+    engine::{resource_manager::ResourceManager, Engine, EngineInitParams, SerializationContext},
     event::{ElementState, Event, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     gui::{
@@ -26,8 +23,9 @@ use fyrox::{
         widget::WidgetBuilder,
     },
     gui::{BuildContext, UiNode},
-    material::{shader::SamplerFallback, Material, PropertyValue},
+    material::{shader::SamplerFallback, Material, PropertyValue, SharedMaterial},
     resource::texture::TextureWrapMode,
+    scene::mesh::surface::SurfaceSharedData,
     scene::{
         base::BaseBuilder,
         camera::{CameraBuilder, SkyBoxBuilder},
@@ -38,6 +36,7 @@ use fyrox::{
             MeshBuilder,
         },
         node::Node,
+        sound::{SoundBuilder, Status},
         transform::TransformBuilder,
         Scene,
     },
@@ -115,7 +114,6 @@ pub fn set_once() {
 struct GameScene {
     scene: Scene,
     model: Handle<Node>,
-    walk_animation: Handle<Animation>,
 }
 
 struct SceneContext {
@@ -210,7 +208,7 @@ async fn create_scene(resource_manager: ResourceManager, context: Arc<Mutex<Scen
 
     // Instantiate model on scene - but only geometry, without any animations.
     // Instantiation is a process of embedding model resource data in desired scene.
-    let model = model_resource.unwrap().instantiate_geometry(&mut scene);
+    let model = model_resource.unwrap().instantiate(&mut scene);
 
     // Now we have whole sub-graph instantiated, we can start modifying model instance.
     scene.graph[model]
@@ -224,11 +222,9 @@ async fn create_scene(resource_manager: ResourceManager, context: Arc<Mutex<Scen
     // Why? Because animation in *resource* uses information about *resource* bones,
     // not model instance bones, retarget_animations maps animations of each bone on
     // model instance so animation will know about nodes it should operate on.
-    let walk_animation = *walk_animation_resource
+    walk_animation_resource
         .unwrap()
-        .retarget_animations(model, &mut scene)
-        .get(0)
-        .unwrap();
+        .retarget_animations(model, &mut scene.graph);
 
     let mut material = Material::standard();
     material
@@ -249,20 +245,16 @@ async fn create_scene(resource_manager: ResourceManager, context: Arc<Mutex<Scen
                 .build(),
         ),
     )
-    .with_surfaces(vec![SurfaceBuilder::new(Arc::new(Mutex::new(
+    .with_surfaces(vec![SurfaceBuilder::new(SurfaceSharedData::new(
         SurfaceData::make_cube(Matrix4::new_nonuniform_scaling(&Vector3::new(
             25.0, 0.25, 25.0,
         ))),
-    )))
-    .with_material(Arc::new(Mutex::new(material)))
+    ))
+    .with_material(SharedMaterial::new(material))
     .build()])
     .build(&mut scene.graph);
 
-    context.lock().data = Some(GameScene {
-        scene,
-        model,
-        walk_animation,
-    })
+    context.lock().data = Some(GameScene { scene, model })
 }
 
 struct InputController {
@@ -306,7 +298,6 @@ pub fn main_js() {
 
     let mut scene_handle = Handle::NONE;
     let mut model_handle = Handle::NONE;
-    let mut walk_animation = Handle::NONE;
 
     // Create simple user interface that will show some useful info.
     let debug_text = create_ui(&mut engine.user_interface.build_ctx());
@@ -340,17 +331,10 @@ pub fn main_js() {
                     if let Some(scene) = load_context.lock().data.take() {
                         scene_handle = engine.scenes.add(scene.scene);
                         model_handle = scene.model;
-                        walk_animation = scene.walk_animation;
                     }
 
                     if scene_handle.is_some() && model_handle.is_some() {
                         let scene = &mut engine.scenes[scene_handle];
-
-                        scene
-                            .animations
-                            .get_mut(walk_animation)
-                            .get_pose()
-                            .apply(&mut scene.graph);
 
                         // Rotate model according to input controller state.
                         if input_controller.rotate_left {

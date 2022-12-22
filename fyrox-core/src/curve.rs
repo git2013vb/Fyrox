@@ -1,5 +1,6 @@
 use crate::{
     math::{cubicf, lerpf},
+    reflect::prelude::*,
     visitor::prelude::*,
 };
 use std::cmp::Ordering;
@@ -116,9 +117,26 @@ impl CurveKey {
     }
 }
 
-#[derive(Visit, Default, Clone, Debug, PartialEq)]
+#[derive(Visit, Reflect, Clone, Debug, PartialEq)]
+#[reflect(hide_all)]
 pub struct Curve {
+    #[visit(optional)] // Backward compatibility
+    id: Uuid,
+
+    #[visit(optional)] // Backward compatibility
+    name: String,
+
     keys: Vec<CurveKey>,
+}
+
+impl Default for Curve {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: Default::default(),
+            keys: Default::default(),
+        }
+    }
 }
 
 fn sort_keys(keys: &mut [CurveKey]) {
@@ -136,11 +154,35 @@ fn sort_keys(keys: &mut [CurveKey]) {
 impl From<Vec<CurveKey>> for Curve {
     fn from(mut keys: Vec<CurveKey>) -> Self {
         sort_keys(&mut keys);
-        Self { keys }
+        Self {
+            id: Uuid::new_v4(),
+            name: Default::default(),
+            keys,
+        }
     }
 }
 
 impl Curve {
+    #[inline]
+    pub fn set_id(&mut self, id: Uuid) {
+        self.id = id;
+    }
+
+    #[inline]
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    #[inline]
+    pub fn set_name<S: AsRef<str>>(&mut self, name: S) {
+        self.name = name.as_ref().to_owned();
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     #[inline]
     pub fn clear(&mut self) {
         self.keys.clear()
@@ -158,8 +200,8 @@ impl Curve {
 
     #[inline]
     pub fn add_key(&mut self, new_key: CurveKey) {
-        self.keys.push(new_key);
-        sort_keys(&mut self.keys);
+        let pos = self.keys.partition_point(|k| k.location < new_key.location);
+        self.keys.insert(pos, new_key);
     }
 
     #[inline]
@@ -171,51 +213,93 @@ impl Curve {
     }
 
     #[inline]
+    pub fn max_location(&self) -> f32 {
+        self.keys.last().map(|k| k.location).unwrap_or_default()
+    }
+
+    #[inline]
     pub fn value_at(&self, location: f32) -> f32 {
-        if self.keys.is_empty() {
-            // Stub - zero
-            return Default::default();
-        } else if self.keys.len() == 1 {
-            // Single key - just return its value
-            return self.keys.first().unwrap().value;
-        } else if self.keys.len() == 2 {
-            // Special case for two keys (much faster than generic)
-            let pt_a = self.keys.get(0).unwrap();
-            let pt_b = self.keys.get(1).unwrap();
-            if location >= pt_a.location && location <= pt_b.location {
-                let span = pt_b.location - pt_a.location;
-                let t = (location - pt_a.location) / span;
-                return pt_a.interpolate(pt_b, t);
-            } else if location < pt_a.location {
-                return pt_a.value;
+        if let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) {
+            if location <= first.location {
+                first.value
+            } else if location >= last.location {
+                last.value
             } else {
-                return pt_b.value;
+                // Use binary search for multiple spans.
+                let pos = self.keys.partition_point(|k| k.location < location);
+                let left = self.keys.get(pos.saturating_sub(1)).unwrap();
+                let right = self.keys.get(pos).unwrap();
+                left.interpolate(
+                    right,
+                    (location - left.location) / (right.location - left.location),
+                )
             }
-        }
-
-        // Generic case - check for out-of-bounds
-        let first = self.keys.first().unwrap();
-        let last = self.keys.last().unwrap();
-        if location <= first.location {
-            first.value
-        } else if location >= last.location {
-            last.value
         } else {
-            // Find span first
-            let mut pt_a_index = 0;
-            for (i, pt) in self.keys.iter().enumerate() {
-                if location >= pt.location {
-                    pt_a_index = i;
-                }
-            }
-            let pt_b_index = pt_a_index + 1;
-
-            let pt_a = self.keys.get(pt_a_index).unwrap();
-            let pt_b = self.keys.get(pt_b_index).unwrap();
-
-            let span = pt_b.location - pt_a.location;
-            let t = (location - pt_a.location) / span;
-            pt_a.interpolate(pt_b, t)
+            0.0
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::curve::{Curve, CurveKey, CurveKeyKind};
+
+    #[test]
+    fn test_curve_key_insertion_order() {
+        let mut curve = Curve::default();
+
+        // Insert keys in arbitrary order with arbitrary location.
+        curve.add_key(CurveKey::new(0.0, 0.0, CurveKeyKind::Constant));
+        curve.add_key(CurveKey::new(-1.0, 0.0, CurveKeyKind::Constant));
+        curve.add_key(CurveKey::new(3.0, 0.0, CurveKeyKind::Constant));
+        curve.add_key(CurveKey::new(2.0, 0.0, CurveKeyKind::Constant));
+        curve.add_key(CurveKey::new(-5.0, 0.0, CurveKeyKind::Constant));
+
+        // Ensure that keys are sorted by their location.
+        assert_eq!(curve.keys[0].location, -5.0);
+        assert_eq!(curve.keys[1].location, -1.0);
+        assert_eq!(curve.keys[2].location, 0.0);
+        assert_eq!(curve.keys[3].location, 2.0);
+        assert_eq!(curve.keys[4].location, 3.0);
+    }
+
+    #[test]
+    fn test_curve() {
+        let mut curve = Curve::default();
+
+        // Test fetching from empty curve.
+        assert_eq!(curve.value_at(0.0), 0.0);
+
+        curve.add_key(CurveKey::new(0.0, 1.0, CurveKeyKind::Linear));
+
+        // One-key curves must always return its single key value.
+        assert_eq!(curve.value_at(-1.0), 1.0);
+        assert_eq!(curve.value_at(1.0), 1.0);
+        assert_eq!(curve.value_at(0.0), 1.0);
+
+        curve.add_key(CurveKey::new(1.0, 0.0, CurveKeyKind::Linear));
+
+        // Two-key curves must always use interpolation.
+        assert_eq!(curve.value_at(-1.0), 1.0);
+        assert_eq!(curve.value_at(2.0), 0.0);
+        assert_eq!(curve.value_at(0.5), 0.5);
+
+        // Add one more key and do more checks.
+        curve.add_key(CurveKey::new(2.0, 1.0, CurveKeyKind::Linear));
+
+        // Check order of the keys.
+        assert!(curve.keys[0].location <= curve.keys[1].location);
+        assert!(curve.keys[1].location <= curve.keys[2].location);
+
+        // Check generic out-of-bounds fetching.
+        assert_eq!(curve.value_at(-1.0), 1.0); // Left side oob
+        assert_eq!(curve.value_at(3.0), 1.0); // Right side oob.
+
+        // Check edge cases.
+        assert_eq!(curve.value_at(0.0), 1.0); // Left edge.
+        assert_eq!(curve.value_at(2.0), 1.0); // Right edge.
+
+        // Check interpolation.
+        assert_eq!(curve.value_at(0.5), 0.5);
     }
 }

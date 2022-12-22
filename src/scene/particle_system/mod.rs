@@ -75,10 +75,9 @@ use crate::{
         algebra::{Vector2, Vector3},
         color::Color,
         color_gradient::ColorGradient,
-        inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, TriangleDefinition},
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -107,8 +106,8 @@ pub mod emitter;
 pub mod particle;
 
 #[doc(hidden)]
-#[derive(PartialEq, Debug, Clone, Default, Inspect, Reflect)]
-pub struct EmitterWrapper(#[inspect(display_name = "Emitter Type")] pub Emitter);
+#[derive(PartialEq, Debug, Clone, Default, Reflect)]
+pub struct EmitterWrapper(#[reflect(display_name = "Emitter Type")] pub Emitter);
 
 impl Deref for EmitterWrapper {
     type Target = Emitter;
@@ -131,7 +130,7 @@ impl Visit for EmitterWrapper {
 }
 
 /// See module docs.
-#[derive(Debug, Visit, Clone, Inspect, Reflect)]
+#[derive(Debug, Visit, Clone, Reflect)]
 pub struct ParticleSystem {
     base: Base,
 
@@ -154,11 +153,9 @@ pub struct ParticleSystem {
     #[reflect(setter = "set_enabled")]
     enabled: InheritableVariable<bool>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     particles: Vec<Particle>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     free_particles: Vec<u32>,
 }
@@ -192,7 +189,7 @@ impl ParticleSystem {
     /// Set new acceleration that will be applied to all particles,
     /// can be used to change "gravity" vector of particles.
     pub fn set_acceleration(&mut self, accel: Vector3<f32>) -> Vector3<f32> {
-        self.acceleration.set(accel)
+        self.acceleration.set_value_and_mark_modified(accel)
     }
 
     /// Sets new "color curve" that will evaluate color over lifetime.
@@ -200,7 +197,8 @@ impl ParticleSystem {
         &mut self,
         gradient: Option<ColorGradient>,
     ) -> Option<ColorGradient> {
-        self.color_over_lifetime.set(gradient)
+        self.color_over_lifetime
+            .set_value_and_mark_modified(gradient)
     }
 
     /// Return current soft boundary sharpness factor.
@@ -211,7 +209,7 @@ impl ParticleSystem {
     /// Enables or disables particle system. Disabled particle system remains in "frozen" state
     /// until enabled again.
     pub fn set_enabled(&mut self, enabled: bool) -> bool {
-        self.enabled.set(enabled)
+        self.enabled.set_value_and_mark_modified(enabled)
     }
 
     /// Returns current particle system status.
@@ -224,14 +222,15 @@ impl ParticleSystem {
     /// parameter allows you to manipulate particle "softness" - the engine automatically adds
     /// fading to those pixels of a particle which is close enough to other geometry in a scene.
     pub fn set_soft_boundary_sharpness_factor(&mut self, factor: f32) -> f32 {
-        self.soft_boundary_sharpness_factor.set(factor)
+        self.soft_boundary_sharpness_factor
+            .set_value_and_mark_modified(factor)
     }
 
     /// Removes all generated particles.
     pub fn clear_particles(&mut self) {
         self.particles.clear();
         self.free_particles.clear();
-        for emitter in self.emitters.get_mut_silent().iter_mut() {
+        for emitter in self.emitters.get_value_mut_silent().iter_mut() {
             emitter.alive_particles = 0;
         }
     }
@@ -327,7 +326,7 @@ impl ParticleSystem {
 
     /// Sets new texture for particle system.
     pub fn set_texture(&mut self, texture: Option<Texture>) -> Option<Texture> {
-        self.texture.set(texture)
+        self.texture.set_value_and_mark_modified(texture)
     }
 
     /// Returns current texture used by particle system.
@@ -375,11 +374,11 @@ impl NodeTrait for ParticleSystem {
         let dt = context.dt;
 
         if *self.enabled {
-            for emitter in self.emitters.get_mut_silent().iter_mut() {
+            for emitter in self.emitters.get_value_mut_silent().iter_mut() {
                 emitter.tick(dt);
             }
 
-            for (i, emitter) in self.emitters.get_mut_silent().iter_mut().enumerate() {
+            for (i, emitter) in self.emitters.get_value_mut_silent().iter_mut().enumerate() {
                 for _ in 0..emitter.particles_to_spawn {
                     let mut particle = Particle {
                         emitter_index: i as u32,
@@ -404,7 +403,7 @@ impl NodeTrait for ParticleSystem {
                         self.free_particles.push(i as u32);
                         if let Some(emitter) = self
                             .emitters
-                            .get_mut()
+                            .get_value_mut_and_mark_modified()
                             .get_mut(particle.emitter_index as usize)
                         {
                             emitter.alive_particles -= 1;

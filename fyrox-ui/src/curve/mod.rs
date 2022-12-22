@@ -1,7 +1,7 @@
 use crate::{
     brush::Brush,
     core::{
-        algebra::{Matrix3, Point2, Vector2, Vector3},
+        algebra::{Matrix3, Point2, SimdPartialOrd, Vector2, Vector3},
         color::Color,
         curve::{Curve, CurveKeyKind},
         math::{cubicf, inf_sup_cubicf, lerpf, wrap_angle, Rect},
@@ -12,12 +12,15 @@ use crate::{
     define_constructor,
     draw::{CommandTexture, Draw, DrawingContext},
     formatted_text::{FormattedText, FormattedTextBuilder},
+    grid::{Column, GridBuilder, Row},
     menu::{MenuItemBuilder, MenuItemContent, MenuItemMessage},
     message::{ButtonState, KeyCode, MessageDirection, MouseButton, UiMessage},
+    numeric::{NumericUpDownBuilder, NumericUpDownMessage},
     popup::PopupBuilder,
     stack_panel::StackPanelBuilder,
+    text::TextBuilder,
     widget::{Widget, WidgetBuilder, WidgetMessage},
-    BuildContext, Control, UiNode, UserInterface,
+    BuildContext, Control, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 use fxhash::FxHashSet;
 use std::{
@@ -32,13 +35,16 @@ pub mod key;
 pub enum CurveEditorMessage {
     Sync(Curve),
     ViewPosition(Vector2<f32>),
-    Zoom(f32),
+    Zoom(Vector2<f32>),
     ZoomToFit,
+    HighlightZones(Vec<HighlightZone>),
 
     // Internal messages. Use only when you know what you're doing.
     // These are internal because you must use Sync message to request changes
     // in the curve editor.
     ChangeSelectedKeysKind(CurveKeyKind),
+    ChangeSelectedKeysValue(f32),
+    ChangeSelectedKeysLocation(f32),
     RemoveSelection,
     // Position in screen coordinates.
     AddKey(Vector2<f32>),
@@ -47,19 +53,29 @@ pub enum CurveEditorMessage {
 impl CurveEditorMessage {
     define_constructor!(CurveEditorMessage:Sync => fn sync(Curve), layout: false);
     define_constructor!(CurveEditorMessage:ViewPosition => fn view_position(Vector2<f32>), layout: false);
-    define_constructor!(CurveEditorMessage:Zoom => fn zoom(f32), layout: false);
+    define_constructor!(CurveEditorMessage:Zoom => fn zoom(Vector2<f32>), layout: false);
     define_constructor!(CurveEditorMessage:ZoomToFit => fn zoom_to_fit(), layout: false);
+    define_constructor!(CurveEditorMessage:HighlightZones => fn hightlight_zones(Vec<HighlightZone>), layout: false);
     // Internal. Use only when you know what you're doing.
     define_constructor!(CurveEditorMessage:RemoveSelection => fn remove_selection(), layout: false);
     define_constructor!(CurveEditorMessage:ChangeSelectedKeysKind => fn change_selected_keys_kind(CurveKeyKind), layout: false);
+    define_constructor!(CurveEditorMessage:ChangeSelectedKeysValue => fn change_selected_keys_value(f32), layout: false);
+    define_constructor!(CurveEditorMessage:ChangeSelectedKeysLocation => fn change_selected_keys_location(f32), layout: false);
     define_constructor!(CurveEditorMessage:AddKey => fn add_key(Vector2<f32>), layout: false);
+}
+
+/// Highlight zone in values space.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HighlightZone {
+    pub rect: Rect<f32>,
+    pub brush: Brush,
 }
 
 #[derive(Clone)]
 pub struct CurveEditor {
     widget: Widget,
     key_container: KeyContainer,
-    zoom: f32,
+    zoom: Vector2<f32>,
     view_position: Vector2<f32>,
     // Transforms a point from local to view coordinates.
     view_matrix: Cell<Matrix3<f32>>,
@@ -80,6 +96,13 @@ pub struct CurveEditor {
     handle_radius: f32,
     context_menu: ContextMenu,
     text: RefCell<FormattedText>,
+    view_bounds: Option<Rect<f32>>,
+    show_x_values: bool,
+    show_y_values: bool,
+    grid_size: Vector2<f32>,
+    min_zoom: Vector2<f32>,
+    max_zoom: Vector2<f32>,
+    highlight_zones: Vec<HighlightZone>,
 }
 
 crate::define_widget_deref!(CurveEditor);
@@ -94,6 +117,9 @@ struct ContextMenu {
     make_linear: Handle<UiNode>,
     make_cubic: Handle<UiNode>,
     zoom_to_fit: Handle<UiNode>,
+    key_properties: Handle<UiNode>,
+    key_value: Handle<UiNode>,
+    key_location: Handle<UiNode>,
 }
 
 #[derive(Clone)]
@@ -162,6 +188,7 @@ impl Control for CurveEditor {
         ctx.transform_stack.push(Matrix3::identity());
         self.update_matrices();
         self.draw_background(ctx);
+        self.draw_highlight_zones(ctx);
         self.draw_grid(ctx);
         self.draw_curve(ctx);
         self.draw_keys(ctx);
@@ -197,8 +224,13 @@ impl Control for CurveEditor {
                                     initial_mouse_pos,
                                     initial_view_pos,
                                 } => {
-                                    let delta = (pos - initial_mouse_pos).scale(1.0 / self.zoom);
-                                    self.view_position = initial_view_pos + delta;
+                                    let d = pos - initial_mouse_pos;
+                                    let delta = Vector2::new(d.x / self.zoom.x, d.y / self.zoom.y);
+                                    ui.send_message(CurveEditorMessage::view_position(
+                                        self.handle,
+                                        MessageDirection::ToWidget,
+                                        initial_view_pos + delta,
+                                    ));
                                 }
                                 OperationContext::DragTangent { key, left } => {
                                     let key_pos =
@@ -395,10 +427,19 @@ impl Control for CurveEditor {
                     },
                     WidgetMessage::MouseWheel { amount, .. } => {
                         let k = if *amount < 0.0 { 0.9 } else { 1.1 };
+
+                        let new_zoom = if ui.keyboard_modifiers().shift {
+                            Vector2::new(self.zoom.x * k, self.zoom.y)
+                        } else if ui.keyboard_modifiers.control {
+                            Vector2::new(self.zoom.x, self.zoom.y * k)
+                        } else {
+                            self.zoom * k
+                        };
+
                         ui.send_message(CurveEditorMessage::zoom(
                             self.handle,
                             MessageDirection::ToWidget,
-                            self.zoom * k,
+                            new_zoom,
                         ));
                     }
                     _ => {}
@@ -412,10 +453,12 @@ impl Control for CurveEditor {
                             self.key_container = KeyContainer::from(curve);
                         }
                         CurveEditorMessage::ViewPosition(view_position) => {
-                            self.view_position = *view_position;
+                            self.set_view_position(*view_position);
+                            ui.send_message(message.reverse());
                         }
                         CurveEditorMessage::Zoom(zoom) => {
-                            self.zoom = *zoom;
+                            self.zoom = zoom.simd_clamp(self.min_zoom, self.max_zoom);
+                            ui.send_message(message.reverse());
                         }
                         CurveEditorMessage::RemoveSelection => {
                             self.remove_selection(ui);
@@ -432,6 +475,7 @@ impl Control for CurveEditor {
                             });
                             self.set_selection(None, ui);
                             self.sort_keys();
+                            self.send_curve(ui);
                         }
                         CurveEditorMessage::ZoomToFit => {
                             let mut max_y = -f32::MAX;
@@ -514,9 +558,34 @@ impl Control for CurveEditor {
                             let max = Vector2::new(max_x, max_y);
                             let center = (min + max).scale(0.5);
 
-                            let mut offset = self.actual_local_size().scale(0.5 * self.zoom);
-                            offset.y *= -1.0;
-                            self.view_position = center + offset;
+                            ui.send_message(CurveEditorMessage::zoom(
+                                self.handle,
+                                MessageDirection::ToWidget,
+                                Vector2::new(
+                                    self.actual_local_size().x
+                                        / (max.x - min.x).max(5.0 * f32::EPSILON),
+                                    self.actual_local_size().y
+                                        / (max.y - min.y).max(5.0 * f32::EPSILON),
+                                ),
+                            ));
+
+                            ui.send_message(CurveEditorMessage::view_position(
+                                self.handle,
+                                MessageDirection::ToWidget,
+                                Vector2::new(
+                                    self.actual_local_size().x * 0.5 - center.x,
+                                    -self.actual_local_size().y * 0.5 + center.y,
+                                ),
+                            ));
+                        }
+                        CurveEditorMessage::ChangeSelectedKeysValue(value) => {
+                            self.change_selected_keys_value(*value, ui);
+                        }
+                        CurveEditorMessage::ChangeSelectedKeysLocation(location) => {
+                            self.change_selected_keys_location(*location, ui);
+                        }
+                        CurveEditorMessage::HighlightZones(zones) => {
+                            self.highlight_zones = zones.clone();
                         }
                     }
                 }
@@ -565,6 +634,22 @@ impl Control for CurveEditor {
                     MessageDirection::ToWidget,
                 ));
             }
+        } else if let Some(NumericUpDownMessage::<f32>::Value(value)) = message.data() {
+            if message.direction() == MessageDirection::FromWidget {
+                if message.destination() == self.context_menu.key_value {
+                    ui.send_message(CurveEditorMessage::change_selected_keys_value(
+                        self.handle,
+                        MessageDirection::ToWidget,
+                        *value,
+                    ));
+                } else if message.destination() == self.context_menu.key_location {
+                    ui.send_message(CurveEditorMessage::change_selected_keys_location(
+                        self.handle,
+                        MessageDirection::ToWidget,
+                        *value,
+                    ));
+                }
+            }
         }
     }
 }
@@ -593,11 +678,28 @@ fn round_to_step(x: f32, step: f32) -> f32 {
 }
 
 impl CurveEditor {
+    #[allow(clippy::let_and_return)] // Improves readability
+    fn set_view_position(&mut self, position: Vector2<f32>) {
+        self.view_position = self.view_bounds.map_or(position, |bounds| {
+            let local_space_position = -position;
+            let clamped_local_space_position = Vector2::new(
+                local_space_position
+                    .x
+                    .clamp(bounds.position.x, bounds.position.x + 2.0 * bounds.size.x),
+                local_space_position
+                    .y
+                    .clamp(bounds.position.y, bounds.position.y + 2.0 * bounds.size.y),
+            );
+            let clamped_view_space = -clamped_local_space_position;
+            clamped_view_space
+        });
+    }
+
     fn update_matrices(&self) {
         let vp = Vector2::new(self.view_position.x, -self.view_position.y);
         self.view_matrix.set(
             Matrix3::new_nonuniform_scaling_wrt_point(
-                &Vector2::new(self.zoom, self.zoom),
+                &self.zoom,
                 &Point2::from(self.actual_local_size().scale(0.5)),
             ) * Matrix3::new_translation(&vp),
         );
@@ -666,6 +768,30 @@ impl CurveEditor {
             MessageDirection::ToWidget,
             self.selection.is_some(),
         ));
+
+        ui.send_message(WidgetMessage::enabled(
+            self.context_menu.key_properties,
+            MessageDirection::ToWidget,
+            self.selection.is_some(),
+        ));
+
+        if let Some(Selection::Keys { keys }) = self.selection.as_ref() {
+            if let Some(first) = keys.iter().next() {
+                if let Some(key) = self.key_container.key_ref(*first) {
+                    ui.send_message(NumericUpDownMessage::value(
+                        self.context_menu.key_location,
+                        MessageDirection::ToWidget,
+                        key.position.x,
+                    ));
+
+                    ui.send_message(NumericUpDownMessage::value(
+                        self.context_menu.key_value,
+                        MessageDirection::ToWidget,
+                        key.position.y,
+                    ));
+                }
+            }
+        }
     }
 
     fn remove_selection(&mut self, ui: &mut UserInterface) {
@@ -688,6 +814,40 @@ impl CurveEditor {
             }
 
             self.send_curve(ui);
+        }
+    }
+
+    fn change_selected_keys_value(&mut self, value: f32, ui: &mut UserInterface) {
+        if let Some(Selection::Keys { keys }) = self.selection.as_ref() {
+            let mut modified = false;
+            for key in keys {
+                let key_value = &mut self.key_container.key_mut(*key).unwrap().position.y;
+                if (*key_value).ne(&value) {
+                    *key_value = value;
+                    modified = true;
+                }
+            }
+
+            if modified {
+                self.send_curve(ui);
+            }
+        }
+    }
+
+    fn change_selected_keys_location(&mut self, location: f32, ui: &mut UserInterface) {
+        if let Some(Selection::Keys { keys }) = self.selection.as_ref() {
+            let mut modified = false;
+            for key in keys {
+                let key_location = &mut self.key_container.key_mut(*key).unwrap().position.x;
+                if (*key_location).ne(&location) {
+                    *key_location = location;
+                    modified = true;
+                }
+            }
+
+            if modified {
+                self.send_curve(ui);
+            }
         }
     }
 
@@ -753,32 +913,55 @@ impl CurveEditor {
         ctx.commit(screen_bounds, self.background(), CommandTexture::None, None);
     }
 
+    fn draw_highlight_zones(&self, ctx: &mut DrawingContext) {
+        for zone in self.highlight_zones.iter() {
+            let left_top_corner = self.point_to_screen_space(zone.rect.left_top_corner());
+            let bottom_right_corner = self.point_to_screen_space(zone.rect.right_bottom_corner());
+            ctx.push_rect_filled(
+                &Rect::new(
+                    left_top_corner.x,
+                    left_top_corner.y,
+                    bottom_right_corner.x - left_top_corner.x,
+                    bottom_right_corner.y - left_top_corner.y,
+                ),
+                None,
+            );
+            ctx.commit(
+                self.clip_bounds(),
+                zone.brush.clone(),
+                CommandTexture::None,
+                None,
+            );
+        }
+    }
+
     fn draw_grid(&self, ctx: &mut DrawingContext) {
         let screen_bounds = self.screen_bounds();
 
-        let step_size = 50.0 / self.zoom.clamp(0.001, 1000.0);
+        let step_size_x = self.grid_size.x / self.zoom.x;
+        let step_size_y = self.grid_size.y / self.zoom.y;
 
         let mut local_left_bottom = self.point_to_local_space(screen_bounds.left_top_corner());
         let local_left_bottom_n = local_left_bottom;
-        local_left_bottom.x = round_to_step(local_left_bottom.x, step_size);
-        local_left_bottom.y = round_to_step(local_left_bottom.y, step_size);
+        local_left_bottom.x = round_to_step(local_left_bottom.x, step_size_x);
+        local_left_bottom.y = round_to_step(local_left_bottom.y, step_size_y);
 
         let mut local_right_top = self.point_to_local_space(screen_bounds.right_bottom_corner());
-        local_right_top.x = round_to_step(local_right_top.x, step_size);
-        local_right_top.y = round_to_step(local_right_top.y, step_size);
+        local_right_top.x = round_to_step(local_right_top.x, step_size_x);
+        local_right_top.y = round_to_step(local_right_top.y, step_size_y);
 
         let w = (local_right_top.x - local_left_bottom.x).abs();
         let h = (local_right_top.y - local_left_bottom.y).abs();
 
-        let nw = ((w / step_size).ceil()) as usize;
-        let nh = ((h / step_size).ceil()) as usize;
+        let nw = ((w / step_size_x).ceil()) as usize;
+        let nh = ((h / step_size_y).ceil()) as usize;
 
         for ny in 0..=nh {
             let k = ny as f32 / (nh) as f32;
             let y = local_left_bottom.y - k * h;
             ctx.push_line(
-                self.point_to_screen_space(Vector2::new(local_left_bottom.x - step_size, y)),
-                self.point_to_screen_space(Vector2::new(local_right_top.x + step_size, y)),
+                self.point_to_screen_space(Vector2::new(local_left_bottom.x - step_size_x, y)),
+                self.point_to_screen_space(Vector2::new(local_right_top.x + step_size_x, y)),
                 1.0,
             );
         }
@@ -787,8 +970,8 @@ impl CurveEditor {
             let k = nx as f32 / (nw) as f32;
             let x = local_left_bottom.x + k * w;
             ctx.push_line(
-                self.point_to_screen_space(Vector2::new(x, local_left_bottom.y + step_size)),
-                self.point_to_screen_space(Vector2::new(x, local_right_top.y - step_size)),
+                self.point_to_screen_space(Vector2::new(x, local_left_bottom.y + step_size_y)),
+                self.point_to_screen_space(Vector2::new(x, local_right_top.y - step_size_y)),
                 1.0,
             );
         }
@@ -811,26 +994,31 @@ impl CurveEditor {
 
         // Draw values.
         let mut text = self.text.borrow_mut();
-        for ny in 0..=nh {
-            let k = ny as f32 / (nh) as f32;
-            let y = local_left_bottom.y - k * h;
-            text.set_text(format!("{:.1}", y)).build();
-            ctx.draw_text(
-                screen_bounds,
-                self.point_to_screen_space(Vector2::new(local_left_bottom_n.x, y)),
-                &text,
-            );
+
+        if self.show_y_values {
+            for ny in 0..=nh {
+                let k = ny as f32 / (nh) as f32;
+                let y = local_left_bottom.y - k * h;
+                text.set_text(format!("{:.1}", y)).build();
+                ctx.draw_text(
+                    screen_bounds,
+                    self.point_to_screen_space(Vector2::new(local_left_bottom_n.x, y)),
+                    &text,
+                );
+            }
         }
 
-        for nx in 0..=nw {
-            let k = nx as f32 / (nw) as f32;
-            let x = local_left_bottom.x + k * w;
-            text.set_text(format!("{:.1}", x)).build();
-            ctx.draw_text(
-                screen_bounds,
-                self.point_to_screen_space(Vector2::new(x, 0.0)),
-                &text,
-            );
+        if self.show_x_values {
+            for nx in 0..=nw {
+                let k = nx as f32 / (nw) as f32;
+                let x = local_left_bottom.x + k * w;
+                text.set_text(format!("{:.1}", x)).build();
+                ctx.draw_text(
+                    screen_bounds,
+                    self.point_to_screen_space(Vector2::new(x, local_left_bottom_n.y)),
+                    &text,
+                );
+            }
         }
     }
 
@@ -1033,6 +1221,13 @@ pub struct CurveEditorBuilder {
     curve: Curve,
     view_position: Vector2<f32>,
     zoom: f32,
+    view_bounds: Option<Rect<f32>>,
+    show_x_values: bool,
+    show_y_values: bool,
+    grid_size: Vector2<f32>,
+    min_zoom: Vector2<f32>,
+    max_zoom: Vector2<f32>,
+    highlight_zones: Vec<HighlightZone>,
 }
 
 impl CurveEditorBuilder {
@@ -1042,6 +1237,13 @@ impl CurveEditorBuilder {
             curve: Default::default(),
             view_position: Default::default(),
             zoom: 1.0,
+            view_bounds: None,
+            show_x_values: true,
+            show_y_values: true,
+            grid_size: Vector2::new(50.0, 50.0),
+            min_zoom: Vector2::new(0.001, 0.001),
+            max_zoom: Vector2::new(1000.0, 1000.0),
+            highlight_zones: Default::default(),
         }
     }
 
@@ -1060,6 +1262,42 @@ impl CurveEditorBuilder {
         self
     }
 
+    pub fn with_show_x_values(mut self, show_x_values: bool) -> Self {
+        self.show_x_values = show_x_values;
+        self
+    }
+
+    pub fn with_show_y_values(mut self, show_y_values: bool) -> Self {
+        self.show_y_values = show_y_values;
+        self
+    }
+
+    /// View bounds in value-space.
+    pub fn with_view_bounds(mut self, bounds: Rect<f32>) -> Self {
+        self.view_bounds = Some(bounds);
+        self
+    }
+
+    pub fn with_grid_size(mut self, size: Vector2<f32>) -> Self {
+        self.grid_size = size;
+        self
+    }
+
+    pub fn with_min_zoom(mut self, min_zoom: Vector2<f32>) -> Self {
+        self.min_zoom = min_zoom;
+        self
+    }
+
+    pub fn with_max_zoom(mut self, max_zoom: Vector2<f32>) -> Self {
+        self.max_zoom = max_zoom;
+        self
+    }
+
+    pub fn with_highlight_zone(mut self, zones: Vec<HighlightZone>) -> Self {
+        self.highlight_zones = zones;
+        self
+    }
+
     pub fn build(mut self, ctx: &mut BuildContext) -> Handle<UiNode> {
         let keys = KeyContainer::from(&self.curve);
 
@@ -1070,10 +1308,67 @@ impl CurveEditorBuilder {
         let make_cubic;
         let key;
         let zoom_to_fit;
+        let key_properties;
+        let key_value;
+        let key_location;
         let context_menu = PopupBuilder::new(WidgetBuilder::new())
             .with_content(
                 StackPanelBuilder::new(
                     WidgetBuilder::new()
+                        .with_child({
+                            key_properties = GridBuilder::new(
+                                WidgetBuilder::new()
+                                    .with_enabled(false)
+                                    .with_child(
+                                        TextBuilder::new(
+                                            WidgetBuilder::new()
+                                                .with_vertical_alignment(VerticalAlignment::Center)
+                                                .with_margin(Thickness::uniform(1.0))
+                                                .on_row(0)
+                                                .on_column(0),
+                                        )
+                                        .with_text("Location")
+                                        .build(ctx),
+                                    )
+                                    .with_child({
+                                        key_location = NumericUpDownBuilder::<f32>::new(
+                                            WidgetBuilder::new()
+                                                .with_margin(Thickness::uniform(1.0))
+                                                .on_row(0)
+                                                .on_column(1),
+                                        )
+                                        .build(ctx);
+                                        key_location
+                                    })
+                                    .with_child(
+                                        TextBuilder::new(
+                                            WidgetBuilder::new()
+                                                .with_vertical_alignment(VerticalAlignment::Center)
+                                                .with_margin(Thickness::uniform(1.0))
+                                                .on_row(1)
+                                                .on_column(0),
+                                        )
+                                        .with_text("Value")
+                                        .build(ctx),
+                                    )
+                                    .with_child({
+                                        key_value = NumericUpDownBuilder::<f32>::new(
+                                            WidgetBuilder::new()
+                                                .with_margin(Thickness::uniform(1.0))
+                                                .on_row(1)
+                                                .on_column(1),
+                                        )
+                                        .build(ctx);
+                                        key_value
+                                    }),
+                            )
+                            .add_column(Column::auto())
+                            .add_column(Column::stretch())
+                            .add_row(Row::strict(22.0))
+                            .add_row(Row::strict(22.0))
+                            .build(ctx);
+                            key_properties
+                        })
                         .with_child({
                             add_key = MenuItemBuilder::new(WidgetBuilder::new())
                                 .with_content(MenuItemContent::text("Add Key"))
@@ -1134,7 +1429,7 @@ impl CurveEditorBuilder {
                 .with_preview_messages(true)
                 .build(),
             key_container: keys,
-            zoom: 1.0,
+            zoom: Vector2::new(1.0, 1.0),
             view_position: Default::default(),
             view_matrix: Default::default(),
             screen_matrix: Default::default(),
@@ -1160,7 +1455,17 @@ impl CurveEditorBuilder {
                 make_cubic,
                 key,
                 zoom_to_fit,
+                key_properties,
+                key_value,
+                key_location,
             },
+            view_bounds: self.view_bounds,
+            show_x_values: self.show_x_values,
+            show_y_values: self.show_y_values,
+            grid_size: self.grid_size,
+            min_zoom: self.min_zoom,
+            max_zoom: self.max_zoom,
+            highlight_zones: self.highlight_zones,
         };
 
         ctx.add_node(UiNode::new(editor))

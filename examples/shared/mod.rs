@@ -6,7 +6,7 @@
 
 use fyrox::{
     animation::{
-        machine::{Machine, Parameter, PoseNode, State, Transition},
+        machine::{Machine, MachineLayer, Parameter, PoseNode, State, Transition},
         Animation, AnimationSignal,
     },
     core::{
@@ -30,6 +30,10 @@ use fyrox::{
     renderer::QualitySettings,
     resource::texture::TextureWrapMode,
     scene::{
+        animation::{
+            absm::{AnimationBlendingStateMachine, AnimationBlendingStateMachineBuilder},
+            AnimationPlayer,
+        },
         base::BaseBuilder,
         camera::{CameraBuilder, SkyBoxBuilder},
         collider::{Collider, ColliderBuilder, ColliderShape},
@@ -45,6 +49,7 @@ use fyrox::{
         Scene,
     },
 };
+use fyrox_core::uuid::{uuid, Uuid};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -242,7 +247,7 @@ pub async fn load_animation<P: AsRef<Path>>(
         .request_model(path)
         .await
         .unwrap()
-        .retarget_animations(model, scene)
+        .retarget_animations(model, &mut scene.graph)
         .get(0)
         .unwrap()
 }
@@ -252,7 +257,7 @@ pub async fn load_animation<P: AsRef<Path>>(
 pub async fn create_play_animation_state<P: AsRef<Path>>(
     path: P,
     name: &str,
-    machine: &mut Machine,
+    machine_layer: &mut MachineLayer,
     scene: &mut Scene,
     model: Handle<Node>,
     resource_manager: ResourceManager,
@@ -265,20 +270,21 @@ pub async fn create_play_animation_state<P: AsRef<Path>>(
     // 1) Animation pose nodes (PoseNode) which provides poses for states.
     // 2) State - a node that uses connected pose for transitions. Transitions
     //    can be done only from state to state. Other nodes are just provides animations.
-    let node = machine.add_node(PoseNode::make_play_animation(animation));
+    let node = machine_layer.add_node(PoseNode::make_play_animation(animation));
 
     // Finally use new node and create state from it.
-    let state = machine.add_state(State::new(name, node));
+    let state = machine_layer.add_state(State::new(name, node));
 
     (animation, state)
 }
 
 #[derive(Default)]
 pub struct LocomotionMachine {
-    pub machine: Machine,
+    pub machine: Handle<Node>,
     pub jump_animation: Handle<Animation>,
     pub walk_animation: Handle<Animation>,
     pub walk_state: Handle<State>,
+    pub animation_player: Handle<Node>,
 }
 
 pub struct LocomotionMachineInput {
@@ -295,19 +301,22 @@ impl LocomotionMachine {
     const IDLE_TO_JUMP: &'static str = "IdleToJump";
     const JUMP_TO_IDLE: &'static str = "JumpToIdle";
 
-    pub const JUMP_SIGNAL: u64 = 1;
+    pub const JUMP_SIGNAL: Uuid = uuid!("3e536261-9edf-4436-bba0-11173e61c8e9");
 
     pub async fn new(
         scene: &mut Scene,
         model: Handle<Node>,
         resource_manager: ResourceManager,
+        animation_player: Handle<Node>,
     ) -> Self {
-        let mut machine = Machine::new(model);
+        let mut machine = Machine::new();
+
+        let root_layer = &mut machine.layers_mut()[0];
 
         let (walk_animation, walk_state) = create_play_animation_state(
             "examples/data/mutant/walk.fbx",
             "Walk",
-            &mut machine,
+            root_layer,
             scene,
             model,
             resource_manager.clone(),
@@ -316,7 +325,7 @@ impl LocomotionMachine {
         let (_, idle_state) = create_play_animation_state(
             "examples/data/mutant/idle.fbx",
             "Idle",
-            &mut machine,
+            root_layer,
             scene,
             model,
             resource_manager.clone(),
@@ -327,53 +336,61 @@ impl LocomotionMachine {
         let (jump_animation, jump_state) = create_play_animation_state(
             "examples/data/mutant/jump.fbx",
             "Jump",
-            &mut machine,
+            root_layer,
             scene,
             model,
             resource_manager,
         )
         .await;
-        scene
-            .animations
-            .get_mut(jump_animation)
-            // Actual jump (applying force to physical body) must be synced with animation
-            // so we have to be notified about this. This is where signals come into play
-            // you can assign any signal in animation timeline and then in update loop you
-            // can iterate over them and react appropriately.
-            .add_signal(AnimationSignal::new(Self::JUMP_SIGNAL, 0.32))
-            .set_loop(false);
+
+        (**scene.graph[animation_player]
+            .query_component_mut::<AnimationPlayer>()
+            .unwrap()
+            .animations_mut())
+        .get_mut(jump_animation)
+        // Actual jump (applying force to physical body) must be synced with animation
+        // so we have to be notified about this. This is where signals come into play
+        // you can assign any signal in animation timeline and then in update loop you
+        // can iterate over them and react appropriately.
+        .add_signal(AnimationSignal {
+            id: Self::JUMP_SIGNAL,
+            name: "Jump".to_string(),
+            time: 0.32,
+            enabled: true,
+        })
+        .set_loop(false);
 
         // Add transitions between states. This is the "heart" of animation blending state machine
         // it defines how it will respond to input parameters.
-        machine.add_transition(Transition::new(
+        root_layer.add_transition(Transition::new(
             "Walk->Idle",
             walk_state,
             idle_state,
             0.30,
             Self::WALK_TO_IDLE,
         ));
-        machine.add_transition(Transition::new(
+        root_layer.add_transition(Transition::new(
             "Walk->Jump",
             walk_state,
             jump_state,
             0.20,
             Self::WALK_TO_JUMP,
         ));
-        machine.add_transition(Transition::new(
+        root_layer.add_transition(Transition::new(
             "Idle->Walk",
             idle_state,
             walk_state,
             0.30,
             Self::IDLE_TO_WALK,
         ));
-        machine.add_transition(Transition::new(
+        root_layer.add_transition(Transition::new(
             "Idle->Jump",
             idle_state,
             jump_state,
             0.25,
             Self::IDLE_TO_JUMP,
         ));
-        machine.add_transition(Transition::new(
+        root_layer.add_transition(Transition::new(
             "Jump->Idle",
             jump_state,
             idle_state,
@@ -381,16 +398,33 @@ impl LocomotionMachine {
             Self::JUMP_TO_IDLE,
         ));
 
+        let machine = AnimationBlendingStateMachineBuilder::new(BaseBuilder::new())
+            .with_machine(machine)
+            .with_animation_player(animation_player)
+            .build(&mut scene.graph);
+
         Self {
             machine,
             jump_animation,
             walk_animation,
             walk_state,
+            animation_player,
         }
     }
 
-    pub fn apply(&mut self, scene: &mut Scene, dt: f32, input: LocomotionMachineInput) {
-        self.machine
+    pub fn apply(&mut self, scene: &mut Scene, input: LocomotionMachineInput) {
+        let animation_player = scene.graph[self.animation_player]
+            .query_component_ref::<AnimationPlayer>()
+            .unwrap();
+
+        let jump_ended = (**animation_player.animations())
+            .get(self.jump_animation)
+            .has_ended();
+
+        scene.graph[self.machine]
+            .query_component_mut::<AnimationBlendingStateMachine>()
+            .unwrap()
+            .machine_mut()
             // Update parameters which will be used by transitions.
             .set_parameter(Self::IDLE_TO_WALK, Parameter::Rule(input.is_walking))
             .set_parameter(Self::WALK_TO_IDLE, Parameter::Rule(!input.is_walking))
@@ -398,14 +432,8 @@ impl LocomotionMachine {
             .set_parameter(Self::IDLE_TO_JUMP, Parameter::Rule(input.is_jumping))
             .set_parameter(
                 Self::JUMP_TO_IDLE,
-                Parameter::Rule(
-                    !input.is_jumping && scene.animations.get(self.jump_animation).has_ended(),
-                ),
-            )
-            // Finally we can do update tick for machine that will evaluate current pose for character.
-            .evaluate_pose(&scene.animations, dt)
-            // Pose must be applied to graph - remember that animations operate on multiple nodes at once.
-            .apply(&mut scene.graph);
+                Parameter::Rule(!input.is_jumping && jump_ended),
+            );
     }
 }
 
@@ -421,6 +449,7 @@ pub struct Player {
     pub controller: InputController,
     pub locomotion_machine: LocomotionMachine,
     pub model_yaw: SmoothAngle,
+    pub animation_player: Handle<Node>,
 }
 
 impl Player {
@@ -483,9 +512,12 @@ impl Player {
             .unwrap()
             .report_progress(0.60, "Instantiating model...");
 
-        // Instantiate model on scene - but only geometry, without any animations.
-        // Instantiation is a process of embedding model resource data in desired scene.
-        let model_handle = model_resource.instantiate_geometry(scene);
+        let model_handle = model_resource.instantiate(scene);
+
+        let animation_player = scene.graph.find(model_handle, &mut |n| {
+            n.query_component_ref::<AnimationPlayer>().is_some()
+        });
+        assert!(animation_player.is_some());
 
         let body_height = 0.5;
 
@@ -531,7 +563,7 @@ impl Player {
             .report_progress(0.80, "Creating machine...");
 
         let locomotion_machine =
-            LocomotionMachine::new(scene, model_handle, resource_manager).await;
+            LocomotionMachine::new(scene, model_handle, resource_manager, animation_player).await;
 
         Self {
             capsule_collider,
@@ -548,6 +580,7 @@ impl Player {
                 target: 0.0,
                 speed: 10.0,
             },
+            animation_player,
         }
     }
 
@@ -586,14 +619,12 @@ impl Player {
             .unwrap_or_default();
         let is_moving = velocity.norm_squared() > 0.0;
 
-        //let body = scene.graph[self.body].as_rigid_body_mut();
-        let body = scene.graph[self.body].cast_mut::<RigidBody>().unwrap();
-
-        let position = **body.local_transform().position();
+        let animation_player = scene.graph[self.animation_player]
+            .query_component_mut::<AnimationPlayer>()
+            .unwrap();
 
         let mut new_y_vel = None;
-        while let Some(event) = scene
-            .animations
+        while let Some(event) = (**animation_player.animations_mut())
             .get_mut(self.locomotion_machine.jump_animation)
             .pop_event()
         {
@@ -601,6 +632,10 @@ impl Player {
                 new_y_vel = Some(6.0 * dt);
             }
         }
+
+        let body = scene.graph[self.body].cast_mut::<RigidBody>().unwrap();
+
+        let position = **body.local_transform().position();
 
         let quat_yaw = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), self.controller.yaw);
 
@@ -687,9 +722,12 @@ impl Player {
         }
 
         if has_ground_contact && self.controller.jump {
+            let animation_player = scene.graph[self.animation_player]
+                .query_component_mut::<AnimationPlayer>()
+                .unwrap();
+
             // Rewind jump animation to beginning before jump.
-            scene
-                .animations
+            (**animation_player.animations_mut())
                 .get_mut(self.locomotion_machine.jump_animation)
                 .rewind();
         }
@@ -697,7 +735,6 @@ impl Player {
         // Make sure to apply animation machine pose to model explicitly.
         self.locomotion_machine.apply(
             scene,
-            dt,
             LocomotionMachineInput {
                 is_walking: self.controller.walk_backward
                     || self.controller.walk_forward
@@ -717,8 +754,7 @@ impl Player {
                 let mouse_sens = 0.2 * dt;
                 self.controller.yaw -= (delta.0 as f32) * mouse_sens;
                 self.controller.pitch = (self.controller.pitch + (delta.1 as f32) * mouse_sens)
-                    .max(-90.0f32.to_radians())
-                    .min(90.0f32.to_radians());
+                    .clamp(-90.0f32.to_radians(), 90.0f32.to_radians());
             }
             _ => {}
         }
@@ -783,7 +819,7 @@ pub fn create_scene_async(resource_manager: ResourceManager) -> Arc<Mutex<SceneL
                 .request_model("examples/data/sponza/Sponza.rgs")
                 .await
                 .unwrap()
-                .instantiate_geometry(&mut scene);
+                .instantiate(&mut scene);
 
             scene.graph.update_hierarchical_data();
 

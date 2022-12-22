@@ -9,11 +9,9 @@ pub mod shared;
 
 use crate::shared::create_camera;
 use fyrox::{
-    animation::Animation,
     core::{
         algebra::{Matrix4, UnitQuaternion, Vector3},
         color::Color,
-        parking_lot::Mutex,
         pool::Handle,
         sstorage::ImmutableString,
     },
@@ -26,15 +24,17 @@ use fyrox::{
         widget::WidgetBuilder,
         UiNode,
     },
+    material::SharedMaterial,
     material::{shader::SamplerFallback, Material, PropertyValue},
     plugin::{Plugin, PluginConstructor, PluginContext},
     rand::Rng,
     renderer::QualitySettings,
     scene::{
+        animation::AnimationPlayer,
         base::BaseBuilder,
         light::{point::PointLightBuilder, BaseLightBuilder},
         mesh::{
-            surface::{SurfaceBuilder, SurfaceData},
+            surface::{SurfaceBuilder, SurfaceData, SurfaceSharedData},
             MeshBuilder,
         },
         node::Node,
@@ -42,12 +42,10 @@ use fyrox::{
         Scene,
     },
 };
-use std::sync::Arc;
 
 struct SceneLoader {
     scene: Scene,
     camera: Handle<Node>,
-    animations: Vec<Handle<Animation>>,
 }
 
 impl SceneLoader {
@@ -77,16 +75,11 @@ impl SceneLoader {
             resource_manager.request_model("examples/data/mutant/walk.fbx")
         );
 
-        let mut animations = Vec::new();
-
         for z in -10..10 {
             for x in -10..10 {
                 // Instantiate model on scene - but only geometry, without any animations.
                 // Instantiation is a process of embedding model resource data in desired scene.
-                let model_handle = model_resource
-                    .clone()
-                    .unwrap()
-                    .instantiate_geometry(&mut scene);
+                let model_handle = model_resource.clone().unwrap().instantiate(&mut scene);
 
                 // Now we have whole sub-graph instantiated, we can start modifying model instance.
                 scene.graph[model_handle]
@@ -108,16 +101,20 @@ impl SceneLoader {
                 let walk_animation = *walk_animation_resource
                     .clone()
                     .unwrap()
-                    .retarget_animations(model_handle, &mut scene)
+                    .retarget_animations(model_handle, &mut scene.graph)
                     .get(0)
                     .unwrap();
 
-                scene
-                    .animations
-                    .get_mut(walk_animation)
-                    .set_speed(fyrox::rand::thread_rng().gen_range(0.8..1.2));
+                let animation_player_handle = scene.graph.find(model_handle, &mut |n| {
+                    n.query_component_ref::<AnimationPlayer>().is_some()
+                });
 
-                animations.push(walk_animation);
+                (**scene.graph[animation_player_handle]
+                    .query_component_mut::<AnimationPlayer>()
+                    .unwrap()
+                    .animations_mut())
+                .get_mut(walk_animation)
+                .set_speed(fyrox::rand::thread_rng().gen_range(0.8..1.2));
             }
         }
 
@@ -152,20 +149,16 @@ impl SceneLoader {
                     .build(),
             ),
         )
-        .with_surfaces(vec![SurfaceBuilder::new(Arc::new(Mutex::new(
+        .with_surfaces(vec![SurfaceBuilder::new(SurfaceSharedData::new(
             SurfaceData::make_cube(Matrix4::new_nonuniform_scaling(&Vector3::new(
                 300.0, 0.25, 300.0,
             ))),
-        )))
-        .with_material(Arc::new(Mutex::new(material)))
+        ))
+        .with_material(SharedMaterial::new(material))
         .build()])
         .build(&mut scene.graph);
 
-        Self {
-            scene,
-            camera,
-            animations,
-        }
+        Self { scene, camera }
     }
 }
 
@@ -180,7 +173,6 @@ struct Game {
     camera_angle: f32,
     scene: Handle<Scene>,
     camera: Handle<Node>,
-    animations: Vec<Handle<Animation>>,
 }
 
 impl Plugin for Game {
@@ -188,16 +180,6 @@ impl Plugin for Game {
         // Use stored scene handle to borrow a mutable reference of scene in
         // engine.
         let scene = &mut context.scenes[self.scene];
-
-        // Our animations must be applied to scene explicitly, otherwise
-        // it will have no effect.
-        for &animation in self.animations.iter() {
-            scene
-                .animations
-                .get_mut(animation)
-                .get_pose()
-                .apply(&mut scene.graph);
-        }
 
         // Rotate model according to input controller state.
         if self.input_controller.rotate_left {
@@ -215,10 +197,8 @@ impl Plugin for Game {
             MessageDirection::ToWidget,
             format!(
                 "Example 10 - Instancing\n\
-                    Models count: {}\n\
                     Use [A][D] keys to rotate camera.\n\
                     {}",
-                self.animations.len(),
                 context.renderer.get_statistics()
             ),
         ));
@@ -277,7 +257,6 @@ impl PluginConstructor for GameConstructor {
             camera_angle: 0.0,
             scene: context.scenes.add(loader.scene),
             camera: loader.camera,
-            animations: loader.animations,
         })
     }
 }

@@ -7,7 +7,7 @@ use crate::{
     core::{
         algebra::{Matrix2, Matrix3, Matrix4, Vector2, Vector3, Vector4},
         io::{self, FileLoadError},
-        reflect::Reflect,
+        reflect::prelude::*,
         sparse::AtomicIndex,
         visitor::prelude::*,
     },
@@ -19,6 +19,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter};
 use std::{
     borrow::Cow,
     io::Cursor,
@@ -27,6 +28,9 @@ use std::{
 
 /// A source code of the standard shader.
 pub const STANDARD_SHADER_SRC: &str = include_str!("standard/standard.shader");
+
+/// A source code of the standard two-sides shader.
+pub const STANDARD_TWOSIDES_SHADER_SRC: &str = include_str!("standard/standard-two-sides.shader");
 
 /// A source code of the standard terrain shader.
 pub const STANDARD_TERRAIN_SHADER_SRC: &str = include_str!("standard/terrain.shader");
@@ -60,6 +64,8 @@ impl Visit for ShaderState {
                 self.definition = ShaderDefinition::from_str(STANDARD_SHADER_SRC).unwrap();
             } else if self.path == Path::new("StandardTerrain") {
                 self.definition = ShaderDefinition::from_str(STANDARD_TERRAIN_SHADER_SRC).unwrap();
+            } else if self.path == Path::new("StandardTwoSides") {
+                self.definition = ShaderDefinition::from_str(STANDARD_TWOSIDES_SHADER_SRC).unwrap();
             }
         }
 
@@ -269,15 +275,26 @@ impl ResourceData for ShaderState {
 }
 
 /// A set of possible error variants that can occur during shader loading.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ShaderError {
     /// An i/o error has occurred.
-    #[error("A file load error has occurred {0:?}")]
     Io(FileLoadError),
 
     /// A parsing error has occurred.
-    #[error("A parsing error has occurred {0:?}")]
     ParseError(ron::error::SpannedError),
+}
+
+impl Display for ShaderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShaderError::Io(v) => {
+                write!(f, "A file load error has occurred {v:?}")
+            }
+            ShaderError::ParseError(v) => {
+                write!(f, "A parsing error has occurred {v:?}")
+            }
+        }
+    }
 }
 
 impl From<ron::error::SpannedError> for ShaderError {
@@ -540,9 +557,18 @@ impl Shader {
         STANDARD_TERRAIN.clone()
     }
 
+    /// Returns an instance of standard two-sides terrain shader.
+    pub fn standard_twosides() -> Self {
+        STANDARD_TWOSIDES.clone()
+    }
+
     /// Returns a list of standard shader.
     pub fn standard_shaders() -> Vec<Shader> {
-        vec![Self::standard(), Self::standard_terrain()]
+        vec![
+            Self::standard(),
+            Self::standard_terrain(),
+            Self::standard_twosides(),
+        ]
     }
 }
 
@@ -561,6 +587,12 @@ lazy_static! {
 lazy_static! {
     static ref STANDARD_TERRAIN: Shader = Shader(Resource::new(ResourceState::Ok(
         ShaderState::from_str(STANDARD_TERRAIN_SHADER_SRC, "StandardTerrain").unwrap(),
+    )));
+}
+
+lazy_static! {
+    static ref STANDARD_TWOSIDES: Shader = Shader(Resource::new(ResourceState::Ok(
+        ShaderState::from_str(STANDARD_TWOSIDES_SHADER_SRC, "StandardTwoSides").unwrap(),
     )));
 }
 

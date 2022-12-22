@@ -1,49 +1,52 @@
+//! State is a final "container" for animation pose. See [`State`] docs for more info.
+
 use crate::{
     animation::{
-        machine::{node::PoseNodeDefinition, EvaluatePose, ParameterContainer, PoseNode},
+        machine::{EvaluatePose, ParameterContainer, PoseNode},
         AnimationContainer, AnimationPose,
     },
     core::{
         algebra::Vector2,
-        inspect::{Inspect, PropertyInfo},
         pool::{Handle, Pool},
-        reflect::Reflect,
+        reflect::prelude::*,
         visitor::prelude::*,
     },
+    utils::NameProvider,
 };
 use std::cell::Ref;
 
-/// State is a final "container" for animation pose. It has backing pose node which provides a
-/// set of values.
-#[derive(Default, Debug, Visit, Clone)]
+/// State is a final "container" for animation pose. It has backing pose node which provides a set of values.
+/// States can be connected with each other using _transitions_, states with transitions form a state graph.
+#[derive(Default, Debug, Visit, Clone, Reflect, PartialEq)]
 pub struct State {
-    pub definition: Handle<StateDefinition>,
-    pub(crate) name: String,
-    pub(crate) root: Handle<PoseNode>,
+    /// Position of state on the canvas. It is editor-specific data.
+    pub position: Vector2<f32>,
+
+    /// Name of the state.
+    pub name: String,
+
+    /// Root node of the state that provides the state with animation data.
+    #[reflect(read_only)]
+    pub root: Handle<PoseNode>,
 }
 
-#[derive(Default, Debug, Visit, Clone, Inspect, Reflect)]
-pub struct StateDefinition {
-    pub position: Vector2<f32>,
-    pub name: String,
-    #[inspect(skip)]
-    pub root: Handle<PoseNodeDefinition>,
+impl NameProvider for State {
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl State {
     /// Creates new instance of state with a given pose.
     pub fn new(name: &str, root: Handle<PoseNode>) -> Self {
         Self {
-            definition: Default::default(),
+            position: Default::default(),
             name: name.to_owned(),
             root,
         }
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
+    /// Returns a final pose of the state.
     pub fn pose<'a>(&self, nodes: &'a Pool<PoseNode>) -> Option<Ref<'a, AnimationPose>> {
         nodes.try_borrow(self.root).map(|root| root.pose())
     }

@@ -8,8 +8,7 @@
 
 use crate::dsp::DelayLine;
 use fyrox_core::{
-    inspect::{Inspect, PropertyInfo},
-    reflect::Reflect,
+    reflect::prelude::*,
     visitor::{Visit, VisitResult, Visitor},
 };
 
@@ -33,7 +32,7 @@ impl Default for OnePole {
 }
 
 fn get_b1(fc: f32) -> f32 {
-    (-2.0 * std::f32::consts::PI * fc.min(1.0).max(0.0)).exp()
+    (-2.0 * std::f32::consts::PI * fc.clamp(0.0, 1.0)).exp()
 }
 
 impl OnePole {
@@ -55,7 +54,7 @@ impl OnePole {
 
     /// Sets pole of filter directly.
     pub fn set_pole(&mut self, pole: f32) {
-        self.b1 = pole.min(1.0).max(0.0);
+        self.b1 = pole.clamp(0.0, 1.0);
         self.a0 = 1.0 - self.b1;
     }
 
@@ -197,7 +196,7 @@ pub enum BiquadKind {
 
 /// Generic second order digital filter.
 /// More info here: <https://ccrma.stanford.edu/~jos/filters/BiQuad_Section.html>
-#[derive(Clone, Debug, Inspect, Reflect, Visit, PartialEq)]
+#[derive(Clone, Debug, Reflect, Visit, PartialEq)]
 pub struct Biquad {
     /// B0 Coefficient of the equation.
     pub b0: f32,
@@ -209,9 +208,9 @@ pub struct Biquad {
     pub a1: f32,
     /// A2 Coefficient of the equation.
     pub a2: f32,
-    #[inspect(skip)]
+    #[reflect(hidden)]
     prev1: f32,
-    #[inspect(skip)]
+    #[reflect(hidden)]
     prev2: f32,
 }
 

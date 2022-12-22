@@ -18,6 +18,7 @@ use crate::{
     utils::value_as_u8_slice,
 };
 use fxhash::FxHasher;
+use std::fmt::{Display, Formatter};
 use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -61,13 +62,13 @@ impl VertexAttributeDataType {
 #[derive(Copy, Clone, PartialOrd, PartialEq, Eq, Ord, Hash, Visit, Debug)]
 #[repr(u32)]
 pub enum VertexAttributeUsage {
-    /// Vertex position. Usually Vector2<f32> or Vector3<f32>.
+    /// Vertex position. Usually `Vector2<f32>` or `Vector3<f32>`.
     Position = 0,
-    /// Vertex normal. Usually Vector3<f32>, more rare Vector3<u16> (F16).
+    /// Vertex normal. Usually `Vector3<f32>`, more rare `Vector3<u16>` (F16).
     Normal = 1,
-    /// Vertex tangent. Usually Vector3<f32>.
+    /// Vertex tangent. Usually `Vector3<f32>`.
     Tangent = 2,
-    /// First texture coordinates. Usually Vector2<f32>.
+    /// First texture coordinates. Usually `Vector2<f32>`.
     /// It may be used for everything else, not only for texture coordinates.
     TexCoord0 = 3,
     /// Second texture coordinates.
@@ -84,9 +85,9 @@ pub enum VertexAttributeUsage {
     TexCoord6 = 9,
     /// Eighth texture coordinates.
     TexCoord7 = 10,
-    /// Bone weights. Usually Vector4<f32>.
+    /// Bone weights. Usually `Vector4<f32>`.
     BoneWeight = 11,
-    /// Bone indices. Usually Vector4<u8>.
+    /// Bone indices. Usually `Vector4<u8>`.
     BoneIndices = 12,
     /// Maximum amount of attribute kinds.
     Count,
@@ -365,14 +366,12 @@ impl<'a> VertexBufferRefMut<'a> {
 }
 
 /// An error that may occur during input data and layout validation.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ValidationError {
     /// Attribute size must be either 1, 2, 3 or 4.
-    #[error("Invalid attribute size {0}. Must be either 1, 2, 3 or 4")]
     InvalidAttributeSize(usize),
 
     /// Data size is not correct.
-    #[error("Invalid data size. Expected {}, got {}.", expected, actual)]
     InvalidDataSize {
         /// Expected data size in bytes.
         expected: usize,
@@ -381,7 +380,6 @@ pub enum ValidationError {
     },
 
     /// Trying to add vertex of incorrect size.
-    #[error("Invalid vertex size. Expected {}, got {}.", expected, actual)]
     InvalidVertexSize {
         /// Expected vertex size.
         expected: u8,
@@ -390,12 +388,32 @@ pub enum ValidationError {
     },
 
     /// A duplicate of a descriptor was found.
-    #[error("A duplicate of a descriptor was found.")]
     DuplicatedAttributeDescriptor,
 
     /// Duplicate shader locations were found.
-    #[error("Duplicate shader locations were found {0}.")]
     ConflictingShaderLocations(usize),
+}
+
+impl Display for ValidationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationError::InvalidAttributeSize(v) => {
+                write!(f, "Invalid attribute size {v}. Must be either 1, 2, 3 or 4")
+            }
+            ValidationError::InvalidDataSize { expected, actual } => {
+                write!(f, "Invalid data size. Expected {expected}, got {actual}.")
+            }
+            ValidationError::InvalidVertexSize { expected, actual } => {
+                write!(f, "Invalid vertex size. Expected {expected}, got {actual}.",)
+            }
+            ValidationError::DuplicatedAttributeDescriptor => {
+                write!(f, "A duplicate of a descriptor was found.")
+            }
+            ValidationError::ConflictingShaderLocations(v) => {
+                write!(f, "Duplicate shader locations were found {v}.")
+            }
+        }
+    }
 }
 
 impl VertexBuffer {
@@ -708,14 +726,25 @@ impl<'a> PartialEq for VertexViewMut<'a> {
 }
 
 /// An error that may occur during fetching using vertex read/write accessor.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum VertexFetchError {
     /// Trying to read/write non-existent attribute.
-    #[error("No attribute with such usage: {0:?}")]
     NoSuchAttribute(VertexAttributeUsage),
     /// IO error.
-    #[error("An i/o error has occurred {0:?}")]
     Io(std::io::Error),
+}
+
+impl Display for VertexFetchError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VertexFetchError::NoSuchAttribute(v) => {
+                write!(f, "No attribute with such usage: {v:?}")
+            }
+            VertexFetchError::Io(v) => {
+                write!(f, "An i/o error has occurred {v:?}")
+            }
+        }
+    }
 }
 
 impl From<std::io::Error> for VertexFetchError {

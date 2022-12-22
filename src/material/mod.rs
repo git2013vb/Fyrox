@@ -6,6 +6,7 @@
 
 use crate::{
     asset::ResourceState,
+    core::reflect::prelude::*,
     core::{
         algebra::{Matrix2, Matrix3, Matrix4, Vector2, Vector3, Vector4},
         color::Color,
@@ -18,7 +19,10 @@ use crate::{
     resource::texture::Texture,
 };
 use fxhash::FxHashMap;
+use fyrox_core::parking_lot::{Mutex, MutexGuard};
+use std::fmt::{Display, Formatter};
 use std::ops::Deref;
+use std::sync::Arc;
 
 pub mod shader;
 
@@ -347,22 +351,15 @@ pub struct Material {
 }
 
 /// A set of possible errors that can occur when working with materials.
-#[derive(Clone, Debug, thiserror::Error)]
+#[derive(Clone, Debug)]
 pub enum MaterialError {
     /// A property is missing.
-    #[error("Unable to find material property {}", property_name)]
     NoSuchProperty {
         /// Name of the property.
         property_name: String,
     },
 
     /// Attempt to set a value of wrong type to a property.
-    #[error(
-        "Attempt to set a value of wrong type to {} property. Expected: {:?}, given {:?}",
-        property_name,
-        expected,
-        given
-    )]
     TypeMismatch {
         /// Name of the property.
         property_name: String,
@@ -371,6 +368,27 @@ pub enum MaterialError {
         /// Given property value.
         given: PropertyValue,
     },
+}
+
+impl Display for MaterialError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MaterialError::NoSuchProperty { property_name } => {
+                write!(f, "Unable to find material property {property_name}")
+            }
+            MaterialError::TypeMismatch {
+                property_name,
+                expected,
+                given,
+            } => {
+                write!(
+                    f,
+                    "Attempt to set a value of wrong type \
+                to {property_name} property. Expected: {expected:?}, given {given:?}"
+                )
+            }
+        }
+    }
 }
 
 impl Material {
@@ -663,5 +681,61 @@ impl Material {
     /// Returns immutable reference to internal property storage.
     pub fn properties(&self) -> &FxHashMap<ImmutableString, PropertyValue> {
         &self.properties
+    }
+}
+
+/// Shared material is a material instance that can be used across multiple objects. It is useful
+/// when you need to have multiple objects that have the same material.
+///
+/// Shared material is also tells a renderer that this material can be used for efficient rendering -
+/// the renderer will be able to optimize rendering when it knows that multiple objects share the
+/// same material.
+#[derive(Reflect, Clone, Debug)]
+pub struct SharedMaterial(#[reflect(hidden)] Arc<Mutex<Material>>);
+
+impl Default for SharedMaterial {
+    fn default() -> Self {
+        Self::new(Material::standard())
+    }
+}
+
+impl PartialEq for SharedMaterial {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Visit for SharedMaterial {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        self.0.visit(name, visitor)
+    }
+}
+
+impl SharedMaterial {
+    /// Creates new shared material from a material instance.
+    pub fn new(material: Material) -> Self {
+        Self(Arc::new(Mutex::new(material)))
+    }
+
+    /// Provides access to inner material.
+    pub fn lock(&self) -> MutexGuard<'_, Material> {
+        self.0.lock()
+    }
+
+    /// Returns unique id of the material. The id is not stable across multiple runs of an application!
+    pub fn key(&self) -> u64 {
+        &*self.0 as *const _ as u64
+    }
+
+    /// Returns total use count of the material.
+    pub fn use_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
+    /// Creates a deep copy of shared material, making "unique" clone of the underlying material.
+    /// It is useful when you need to create unique version of a material and set its properties
+    /// to some specific values and assign it to an object.
+    pub fn deep_copy(&self) -> Self {
+        Self::new(self.0.lock().clone())
     }
 }

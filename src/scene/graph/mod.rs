@@ -26,11 +26,10 @@ use crate::{
     asset::ResourceState,
     core::{
         algebra::{Matrix4, Rotation3, UnitQuaternion, Vector2, Vector3},
-        inspect::{Inspect, PropertyInfo},
         instant,
         math::Matrix4Ext,
         pool::{Handle, MultiBorrowContext, Pool, Ticket},
-        reflect::Reflect,
+        reflect::prelude::*,
         variable::try_inherit_properties,
         visitor::{Visit, VisitResult, Visitor},
     },
@@ -103,17 +102,14 @@ impl GraphPerformanceStatistics {
 pub type NodePool = Pool<Node, NodeContainer>;
 
 /// See module docs.
-#[derive(Debug, Inspect, Reflect)]
+#[derive(Debug, Reflect)]
 pub struct Graph {
-    #[inspect(skip)]
     #[reflect(hidden)]
     root: Handle<Node>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pool: NodePool,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     stack: Vec<Handle<Node>>,
 
@@ -124,10 +120,10 @@ pub struct Graph {
     pub physics2d: dim2::physics::PhysicsWorld,
 
     /// Backing sound context. It is responsible for sound rendering.
+    #[reflect(hidden)]
     pub sound_context: SoundContext,
 
     /// Performance statistics of a last [`Graph::update`] call.
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub performance_statistics: GraphPerformanceStatistics,
 
@@ -202,6 +198,15 @@ fn isometric_global_transform(nodes: &NodePool, node: Handle<Node>) -> Matrix4<f
     } else {
         isometric_local_transform(nodes, node)
     }
+}
+
+// Clears all information about parent-child relations of a given node. This is needed in some
+// cases (mostly when copying a node), because `Graph::add_node` uses children list to attach
+// children to the given node, and when copying a node it is important that this step is skipped.
+fn clear_links(mut node: Node) -> Node {
+    node.children.clear();
+    node.parent = Handle::NONE;
+    node
 }
 
 impl Graph {
@@ -298,9 +303,27 @@ impl Graph {
         self.pool.try_borrow(handle)
     }
 
+    /// Tries to borrow a node and fetch its component of specified type.
+    pub fn try_get_of_type<T>(&self, handle: Handle<Node>) -> Option<&T>
+    where
+        T: 'static,
+    {
+        self.try_get(handle)
+            .and_then(|n| n.query_component_ref::<T>())
+    }
+
     /// Tries to mutably borrow a node, returns Some(node) if the handle is valid, None - otherwise.
     pub fn try_get_mut(&mut self, handle: Handle<Node>) -> Option<&mut Node> {
         self.pool.try_borrow_mut(handle)
+    }
+
+    /// Tries to mutably borrow a node and fetch its component of specified type.
+    pub fn try_get_mut_of_type<T>(&mut self, handle: Handle<Node>) -> Option<&mut T>
+    where
+        T: 'static,
+    {
+        self.try_get_mut(handle)
+            .and_then(|n| n.query_component_mut::<T>())
     }
 
     /// Begins multi-borrow that allows you to as many (`N`) **unique** references to the graph
@@ -343,8 +366,7 @@ impl Graph {
         let parent_handle = std::mem::replace(&mut self.pool[node_handle].parent, Handle::NONE);
 
         // Remove child from parent's children list
-        if parent_handle.is_some() {
-            let parent = &mut self.pool[parent_handle];
+        if let Some(parent) = self.pool.try_borrow_mut(parent_handle) {
             if let Some(i) = parent.children().iter().position(|h| *h == node_handle) {
                 parent.children.remove(i);
             }
@@ -540,7 +562,7 @@ impl Graph {
 
         for (parent, children) in to_copy.iter() {
             // Copy parent first.
-            let parent_copy = self.pool[*parent].clone_box();
+            let parent_copy = clear_links(self.pool[*parent].clone_box());
             let parent_copy_handle = self.add_node(parent_copy);
             old_new_mapping.map.insert(*parent, parent_copy_handle);
 
@@ -551,7 +573,7 @@ impl Graph {
             // Copy children and link to new parent.
             for &child in children {
                 if filter(child, &self.pool[child]) {
-                    let child_copy = self.pool[child].clone_box();
+                    let child_copy = clear_links(self.pool[child].clone_box());
                     let child_copy_handle = self.add_node(child_copy);
                     old_new_mapping.map.insert(child, child_copy_handle);
                     self.link_nodes(child_copy_handle, parent_copy_handle);
@@ -571,9 +593,7 @@ impl Graph {
     /// this method returns copied node directly, it does not inserts it in any graph.
     pub fn copy_single_node(&self, node_handle: Handle<Node>) -> Node {
         let node = &self.pool[node_handle];
-        let mut clone = node.clone_box();
-        clone.parent = Handle::NONE;
-        clone.children.clear();
+        let mut clone = clear_links(node.clone_box());
         if let Some(ref mut mesh) = clone.cast_mut::<Mesh>() {
             for surface in mesh.surfaces_mut() {
                 surface.bones.clear();
@@ -593,7 +613,7 @@ impl Graph {
         F: FnMut(Handle<Node>, &Node) -> bool,
     {
         let src_node = &self.pool[root_handle];
-        let dest_node = src_node.clone_box();
+        let dest_node = clear_links(src_node.clone_box());
         let dest_copy_handle = dest_graph.add_node(dest_node);
         old_new_mapping.map.insert(root_handle, dest_copy_handle);
         for &src_child_handle in src_node.children() {
@@ -865,11 +885,15 @@ impl Graph {
         ) {
             let node = &nodes[node_handle];
 
-            let (parent_global_transform, parent_visibility) =
+            let (parent_global_transform, parent_visibility, parent_enabled) =
                 if let Some(parent) = nodes.try_borrow(node.parent()) {
-                    (parent.global_transform(), parent.global_visibility())
+                    (
+                        parent.global_transform(),
+                        parent.global_visibility(),
+                        parent.is_globally_enabled(),
+                    )
                 } else {
-                    (Matrix4::identity(), true)
+                    (Matrix4::identity(), true, true)
                 };
 
             let new_global_transform = parent_global_transform * node.local_transform().matrix();
@@ -888,6 +912,7 @@ impl Graph {
             node.global_transform.set(new_global_transform);
             node.global_visibility
                 .set(parent_visibility && node.visibility());
+            node.global_enabled.set(parent_enabled && node.is_enabled());
 
             for &child in node.children() {
                 update_recursively(nodes, sound_context, physics, physics2d, child);
@@ -944,31 +969,24 @@ impl Graph {
         self.performance_statistics.sound_update_time = self.sound_context.full_render_duration();
 
         for i in 0..self.pool.get_capacity() {
-            let mut update_context = UpdateContext {
-                frame_size,
-                dt,
-                // SAFETY: There multiple reasons why this is safe to get immutable reference to nodes
-                // along with mutable reference:
-                //
-                // 1) `Pool` uses indexes to reference data, any internal buffer reallocation in the
-                //    pool will **not** invalidate anything.
-                // 2) Internal pool reallocation is not possible, because use it for mutable iteration,
-                //    and does **not** allow any other code to call dangerous methods, because second
-                //    reference is immutable.
-                // 3) `Pool::free` does not cause any memory reallocation, so pointers in pool iterators
-                //    will be valid.
-                // 4) There is no multithreading in update calls, so no data races.
-                nodes: unsafe { &(*(self as *const Graph)).pool },
-                physics: &mut self.physics,
-                physics2d: &mut self.physics2d,
-                sound_context: &mut self.sound_context,
-            };
-
             let handle = self.pool.handle_from_index(i);
-            if let Some(node) = self.pool.at_mut(i) {
+            if let Some((ticket, mut node)) = self.pool.try_take_reserve(handle) {
                 node.transform_modified.set(false);
 
-                let is_alive = node.update(&mut update_context);
+                let is_alive = if node.is_globally_enabled() {
+                    node.update(&mut UpdateContext {
+                        frame_size,
+                        dt,
+                        nodes: &mut self.pool,
+                        physics: &mut self.physics,
+                        physics2d: &mut self.physics2d,
+                        sound_context: &mut self.sound_context,
+                    })
+                } else {
+                    true
+                };
+
+                self.pool.put_back(ticket, node);
 
                 if !is_alive {
                     self.remove_node(handle);

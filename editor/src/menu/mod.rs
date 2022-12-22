@@ -1,4 +1,5 @@
 use crate::{
+    animation::AnimationEditor,
     menu::{
         create::CreateEntityRootMenu, edit::EditMenu, file::FileMenu, utils::UtilsMenu,
         view::ViewMenu,
@@ -6,7 +7,7 @@ use crate::{
     scene::EditorScene,
     send_sync_message,
     settings::Settings,
-    AbsmEditor, CurveEditorWindow, GameEngine, Message, Mode,
+    AbsmEditor, CurveEditorWindow, GameEngine, Message, Mode, SceneSettingsWindow,
 };
 use fyrox::{
     core::{algebra::Vector2, pool::Handle, scope_profile},
@@ -19,6 +20,7 @@ use fyrox::{
 };
 use std::sync::mpsc::Sender;
 
+pub mod animation;
 pub mod create;
 pub mod dim2;
 pub mod edit;
@@ -51,6 +53,8 @@ pub struct Panels<'b> {
     pub path_fixer: Handle<UiNode>,
     pub curve_editor: &'b CurveEditorWindow,
     pub absm_editor: &'b AbsmEditor,
+    pub scene_settings: &'b SceneSettingsWindow,
+    pub animation_editor: &'b AnimationEditor,
 }
 
 pub struct MenuContext<'a, 'b> {
@@ -145,6 +149,7 @@ impl Menu {
             self.file_menu.save_as,
             self.create_entity_menu.menu,
             self.edit_menu.menu,
+            self.file_menu.open_scene_settings,
         ]
         .iter()
         {
@@ -159,12 +164,8 @@ impl Menu {
         scope_profile!();
 
         if let Some(scene) = ctx.editor_scene.as_mut() {
-            self.edit_menu.handle_ui_message(
-                message,
-                &self.message_sender,
-                &mut **scene,
-                ctx.engine,
-            );
+            self.edit_menu
+                .handle_ui_message(message, &self.message_sender, scene, ctx.engine);
 
             self.create_entity_menu.handle_ui_message(
                 message,
@@ -181,7 +182,7 @@ impl Menu {
             &ctx.editor_scene,
             ctx.engine,
             ctx.settings,
-            ctx.panels.configurator_window,
+            &ctx.panels,
         );
         self.view_menu
             .handle_ui_message(message, &ctx.engine.user_interface, &ctx.panels);

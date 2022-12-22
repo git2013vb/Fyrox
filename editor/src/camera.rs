@@ -143,8 +143,8 @@ impl CameraController {
 
     pub fn on_mouse_move(&mut self, delta: Vector2<f32>, settings: &CameraSettings) {
         if self.rotate {
-            self.yaw -= delta.x as f32 * 0.01;
-            self.pitch += delta.y as f32 * 0.01;
+            self.yaw -= delta.x * 0.01;
+            self.pitch += delta.y * 0.01;
             if self.pitch > 90.0f32.to_radians() {
                 self.pitch = 90.0f32.to_radians();
             }
@@ -316,7 +316,7 @@ impl CameraController {
                 }
 
                 if let Some(v) = move_vec.try_normalize(std::f32::EPSILON) {
-                    move_vec = v.scale(self.speed_factor * 10.0 * dt);
+                    move_vec = v.scale(self.speed_factor * settings.speed * dt);
                 }
 
                 move_vec += side * self.drag_side;

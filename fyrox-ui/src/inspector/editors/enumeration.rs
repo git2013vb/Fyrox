@@ -1,6 +1,6 @@
 use crate::{
     border::BorderBuilder,
-    core::{inspect::Inspect, pool::Handle},
+    core::pool::Handle,
     decorator::DecoratorBuilder,
     define_constructor,
     dropdown_list::{DropdownList, DropdownListBuilder, DropdownListMessage},
@@ -31,9 +31,9 @@ use strum::VariantNames;
 
 const LOCAL_SYNC_FLAG: u64 = 0xFF;
 
-pub trait InspectableEnum: Debug + Inspect + Reflect + Clone + 'static {}
+pub trait InspectableEnum: Debug + Reflect + Clone + 'static {}
 
-impl<T: Debug + Inspect + Reflect + Clone + 'static> InspectableEnum for T {}
+impl<T: Debug + Reflect + Clone + 'static> InspectableEnum for T {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnumPropertyEditorMessage {
@@ -354,7 +354,7 @@ where
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
-            ctx.property_info.description.as_ref(),
+            ctx.property_info.description,
             variant_selector,
             {
                 editor = EnumPropertyEditorBuilder::new(WidgetBuilder::new())

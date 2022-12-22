@@ -10,40 +10,45 @@ mod document;
 pub mod error;
 mod scene;
 
-use crate::resource::model::{MaterialSearchOptions, ModelImportOptions};
-use crate::scene::mesh::Mesh;
-use crate::scene::pivot::PivotBuilder;
 use crate::{
-    animation::{Animation, AnimationContainer, KeyFrame, Track},
+    animation::{track::Track, Animation, AnimationContainer},
     core::{
         algebra::{Matrix4, Point3, UnitQuaternion, Vector2, Vector3, Vector4},
+        curve::{CurveKey, CurveKeyKind},
         instant::Instant,
         io,
         math::{self, triangulator::triangulate, RotationOrder},
-        parking_lot::Mutex,
         pool::Handle,
         sstorage::ImmutableString,
+        uuid::Uuid,
     },
     engine::resource_manager::ResourceManager,
     material::{shader::SamplerFallback, PropertyValue},
-    resource::fbx::{
-        document::FbxDocument,
-        error::FbxError,
-        scene::{
-            animation::FbxAnimationCurveNodeType, geometry::FbxGeometry, model::FbxModel,
-            FbxComponent, FbxMapping, FbxScene,
+    resource::{
+        fbx::{
+            document::FbxDocument,
+            error::FbxError,
+            scene::{
+                animation::{FbxAnimationCurveNode, FbxAnimationCurveNodeType},
+                geometry::FbxGeometry,
+                model::FbxModel,
+                FbxComponent, FbxMapping, FbxScene,
+            },
         },
+        model::{MaterialSearchOptions, ModelImportOptions},
     },
     scene::{
-        base::BaseBuilder,
+        animation::AnimationPlayerBuilder,
+        base::{BaseBuilder, InstanceId},
         graph::Graph,
         mesh::{
             buffer::{VertexAttributeUsage, VertexWriteTrait},
-            surface::{Surface, SurfaceData, VertexWeightSet},
+            surface::{Surface, SurfaceData, SurfaceSharedData, VertexWeightSet},
             vertex::{AnimatedVertex, StaticVertex},
-            MeshBuilder,
+            Mesh, MeshBuilder,
         },
         node::Node,
+        pivot::PivotBuilder,
         transform::TransformBuilder,
         Scene,
     },
@@ -53,7 +58,12 @@ use crate::{
     },
 };
 use fxhash::{FxHashMap, FxHashSet};
-use std::{cmp::Ordering, path::Path, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::Path,
+};
 use walkdir::WalkDir;
 
 /// Input angles in degrees
@@ -259,13 +269,13 @@ async fn create_surfaces(
     if model.materials.is_empty() {
         assert_eq!(data_set.len(), 1);
         let data = data_set.into_iter().next().unwrap();
-        let mut surface = Surface::new(Arc::new(Mutex::new(data.builder.build())));
+        let mut surface = Surface::new(SurfaceSharedData::new(data.builder.build()));
         surface.vertex_weights = data.skin_data;
         surfaces.push(surface);
     } else {
         assert_eq!(data_set.len(), model.materials.len());
         for (&material_handle, data) in model.materials.iter().zip(data_set.into_iter()) {
-            let mut surface = Surface::new(Arc::new(Mutex::new(data.builder.build())));
+            let mut surface = Surface::new(SurfaceSharedData::new(data.builder.build()));
             surface.vertex_weights = data.skin_data;
             let material = fbx_scene.get(material_handle).as_material()?;
             if let Err(e) = surface.material().lock().set_property(
@@ -320,7 +330,7 @@ async fn create_surfaces(
                     if let Some(texture_path) = texture_path {
                         let texture = resource_manager.request_texture(texture_path.as_path());
 
-                        // Make up your mind, Autodesk.
+                        // Make up your mind, Autodesk and Blender.
                         // Handle all possible combinations of links to auto-import materials.
                         let name_usage = if name.contains("AmbientColor")
                             || name.contains("ambient_color")
@@ -328,9 +338,16 @@ async fn create_surfaces(
                             Some(("aoTexture", SamplerFallback::White))
                         } else if name.contains("DiffuseColor") || name.contains("diffuse_color") {
                             Some(("diffuseTexture", SamplerFallback::White))
-                        } else if name.contains("MetalnessMap") || name.contains("metalness_map") {
+                        } else if name.contains("MetalnessMap")
+                            || name.contains("metalness_map")
+                            || name.contains("ReflectionFactor")
+                        {
                             Some(("metallicTexture", SamplerFallback::Black))
-                        } else if name.contains("RoughnessMap") || name.contains("roughness_map") {
+                        } else if name.contains("RoughnessMap")
+                            || name.contains("roughness_map")
+                            || name.contains("Shininess")
+                            || name.contains("ShininessExponent")
+                        {
                             Some(("roughnessTexture", SamplerFallback::White))
                         } else if name.contains("Bump")
                             || name.contains("bump_map")
@@ -491,9 +508,21 @@ async fn convert_mesh(
 }
 
 fn convert_model_to_base(model: &FbxModel) -> BaseBuilder {
+    // Dirty hack: use name of the model to generate instance id. This is necessary evil, because FBX does
+    // not provide any stable unique id per model. We need stable unique id, to not break parent-child
+    // relations between prefabs. Using the name for this purpose is unideal, because one could easily change
+    // it and it will point to other object. What is much worse, is the fact that pretty much all 3D modelling
+    // software allows to have multiple objects with the same name. This FBX importer has validation layer
+    // for such situations and it will give warnings about duplicate names.
+    let mut hasher = DefaultHasher::new();
+    model.name.hash(&mut hasher);
+    let hash = hasher.finish();
+    let instance_id = InstanceId(Uuid::from_u64_pair(hash, hash));
+
     BaseBuilder::new()
         .with_inv_bind_pose_transform(model.inv_bind_transform)
         .with_name(model.name.as_str())
+        .with_instance_id(instance_id)
         .with_local_transform(
             TransformBuilder::new()
                 .with_local_rotation(quat_from_euler(model.rotation))
@@ -514,8 +543,7 @@ async fn convert_model(
     model: &FbxModel,
     resource_manager: ResourceManager,
     graph: &mut Graph,
-    animations: &mut AnimationContainer,
-    animation_handle: Handle<Animation>,
+    animation: &mut Animation,
     model_path: &Path,
     model_import_options: &ModelImportOptions,
 ) -> Result<Handle<Node>, FbxError> {
@@ -558,54 +586,105 @@ async fn convert_model(
             }
         }
 
-        // Convert to engine format
-        let mut track = Track::new();
-        track.set_node(node_handle);
+        fn fill_track<F: Fn(f32) -> f32>(
+            track: &mut Track,
+            fbx_scene: &FbxScene,
+            fbx_track: &FbxAnimationCurveNode,
+            default: Vector3<f32>,
+            transform_value: F,
+        ) {
+            let curves = track.frames_container_mut().curves_mut();
 
-        let node_local_rotation = quat_from_euler(model.rotation);
+            if !fbx_track.curves.contains_key("d|X") {
+                curves[0].add_key(CurveKey::new(0.0, default.x, CurveKeyKind::Constant));
+            }
+            if !fbx_track.curves.contains_key("d|Y") {
+                curves[1].add_key(CurveKey::new(0.0, default.y, CurveKeyKind::Constant));
+            }
+            if !fbx_track.curves.contains_key("d|Z") {
+                curves[2].add_key(CurveKey::new(0.0, default.z, CurveKeyKind::Constant));
+            }
 
-        let mut time = 0.0;
-        loop {
-            let translation = lcl_translation
-                .map(|curve| curve.eval_vec3(fbx_scene, model.translation, time))
-                .unwrap_or(model.translation);
+            for (id, curve_handle) in fbx_track.curves.iter() {
+                let index = match id.as_str() {
+                    "d|X" => Some(0),
+                    "d|Y" => Some(1),
+                    "d|Z" => Some(2),
+                    _ => None,
+                };
 
-            let rotation = lcl_rotation
-                .map(|curve| curve.eval_quat(fbx_scene, model.rotation, time))
-                .unwrap_or(node_local_rotation);
-
-            let scale = lcl_scale
-                .map(|curve| curve.eval_vec3(fbx_scene, model.scale, time))
-                .unwrap_or(model.scale);
-
-            track.add_key_frame(KeyFrame::new(time, translation, scale, rotation));
-
-            let mut next_time = f32::MAX;
-            for node in [lcl_translation, lcl_rotation, lcl_scale].iter().flatten() {
-                for &curve_handle in node.curves.values() {
-                    let curve_component = fbx_scene.get(curve_handle);
-                    if let FbxComponent::AnimationCurve(curve) = curve_component {
-                        for key in curve.keys.iter() {
-                            if key.time > time {
-                                let distance = key.time - time;
-                                if distance < next_time - key.time {
-                                    next_time = key.time;
-                                }
+                if let Some(index) = index {
+                    if let FbxComponent::AnimationCurve(fbx_curve) = fbx_scene.get(*curve_handle) {
+                        if fbx_curve.keys.is_empty() {
+                            curves[index].add_key(CurveKey::new(
+                                0.0,
+                                default[index],
+                                CurveKeyKind::Constant,
+                            ));
+                        } else {
+                            for pair in fbx_curve.keys.iter() {
+                                curves[index].add_key(CurveKey::new(
+                                    pair.time,
+                                    transform_value(pair.value),
+                                    CurveKeyKind::Linear,
+                                ))
                             }
                         }
                     }
                 }
             }
-
-            if next_time >= f32::MAX {
-                break;
-            }
-
-            time = next_time;
         }
 
-        animations.get_mut(animation_handle).add_track(track);
+        fn add_vec3_key(track: &mut Track, value: Vector3<f32>) {
+            let curves = track.frames_container_mut().curves_mut();
+            curves[0].add_key(CurveKey::new(0.0, value.x, CurveKeyKind::Constant));
+            curves[1].add_key(CurveKey::new(0.0, value.y, CurveKeyKind::Constant));
+            curves[2].add_key(CurveKey::new(0.0, value.z, CurveKeyKind::Constant));
+        }
+
+        // Convert to engine format
+        let mut translation_track = Track::new_position();
+        translation_track.set_target(node_handle);
+        if let Some(lcl_translation) = lcl_translation {
+            fill_track(
+                &mut translation_track,
+                fbx_scene,
+                lcl_translation,
+                model.translation,
+                |v| v,
+            );
+        } else {
+            add_vec3_key(&mut translation_track, model.translation);
+        }
+
+        let mut rotation_track = Track::new_rotation();
+        rotation_track.set_target(node_handle);
+        if let Some(lcl_rotation) = lcl_rotation {
+            fill_track(
+                &mut rotation_track,
+                fbx_scene,
+                lcl_rotation,
+                model.rotation,
+                |v| v.to_radians(),
+            );
+        } else {
+            add_vec3_key(&mut rotation_track, model.rotation);
+        }
+
+        let mut scale_track = Track::new_scale();
+        scale_track.set_target(node_handle);
+        if let Some(lcl_scale) = lcl_scale {
+            fill_track(&mut scale_track, fbx_scene, lcl_scale, model.scale, |v| v);
+        } else {
+            add_vec3_key(&mut scale_track, model.scale);
+        }
+
+        animation.add_track(translation_track);
+        animation.add_track(rotation_track);
+        animation.add_track(scale_track);
     }
+
+    animation.fit_length_to_content();
 
     Ok(node_handle)
 }
@@ -621,7 +700,10 @@ async fn convert(
     model_import_options: &ModelImportOptions,
 ) -> Result<(), FbxError> {
     let root = scene.graph.get_root();
-    let animation_handle = scene.animations.add(Animation::default());
+
+    let mut animation = Animation::default();
+    animation.set_name("Animation");
+
     let mut fbx_model_to_node_map = FxHashMap::default();
     for (component_handle, component) in fbx_scene.pair_iter() {
         if let FbxComponent::Model(model) = component {
@@ -630,8 +712,7 @@ async fn convert(
                 model,
                 resource_manager.clone(),
                 &mut scene.graph,
-                &mut scene.animations,
-                animation_handle,
+                &mut animation,
                 model_path,
                 model_import_options,
             )
@@ -640,6 +721,16 @@ async fn convert(
             fbx_model_to_node_map.insert(component_handle, node);
         }
     }
+
+    // Do not create animation player if there's no animation content.
+    if !animation.tracks().is_empty() {
+        let mut animations_container = AnimationContainer::new();
+        animations_container.add(animation);
+        AnimationPlayerBuilder::new(BaseBuilder::new().with_name("AnimationPlayer"))
+            .with_animations(animations_container)
+            .build(&mut scene.graph);
+    }
+
     // Link according to hierarchy
     for (&fbx_model_handle, node_handle) in fbx_model_to_node_map.iter() {
         if let FbxComponent::Model(fbx_model) = fbx_scene.get(fbx_model_handle) {
@@ -668,7 +759,9 @@ async fn convert(
                         weight.effector = (*bone_handle).into();
                     }
                 }
-                surface.bones = surface_bones.iter().copied().collect();
+                surface
+                    .bones
+                    .set_value_silent(surface_bones.iter().copied().collect());
 
                 let data_rc = surface.data();
                 let mut data = data_rc.lock();

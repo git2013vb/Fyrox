@@ -4,11 +4,10 @@
 use crate::{
     core::{
         algebra::Vector3,
-        inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         num_traits::{NumCast, One, ToPrimitive, Zero},
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -17,10 +16,12 @@ use crate::{
     scene::{
         base::{Base, BaseBuilder},
         graph::{
-            physics::{CoefficientCombineRule, ContactPair, PhysicsWorld},
+            physics::{CoefficientCombineRule, ContactPair, IntersectionPair, PhysicsWorld},
             Graph,
         },
         node::{Node, NodeTrait, SyncContext, TypeUuidProvider},
+        rigidbody::RigidBody,
+        Scene,
     },
     utils::log::Log,
 };
@@ -32,10 +33,10 @@ use std::{
 use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 
 /// Ball is an idea sphere shape defined by a single parameters - its radius.
-#[derive(Clone, Debug, PartialEq, Visit, Inspect, Reflect)]
+#[derive(Clone, Debug, PartialEq, Visit, Reflect)]
 pub struct BallShape {
     /// Radius of the sphere.
-    #[inspect(min_value = 0.0, step = 0.05)]
+    #[reflect(min_value = 0.0, step = 0.05)]
     pub radius: f32,
 }
 
@@ -46,13 +47,13 @@ impl Default for BallShape {
 }
 
 /// Cylinder shape aligned in Y axis.
-#[derive(Clone, Debug, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Clone, Debug, Visit, Reflect, PartialEq)]
 pub struct CylinderShape {
     /// Half height of the cylinder, actual height will be 2 times bigger.
-    #[inspect(min_value = 0.0, step = 0.05)]
+    #[reflect(min_value = 0.0, step = 0.05)]
     pub half_height: f32,
     /// Radius of the cylinder.
-    #[inspect(min_value = 0.0, step = 0.05)]
+    #[reflect(min_value = 0.0, step = 0.05)]
     pub radius: f32,
 }
 
@@ -66,13 +67,13 @@ impl Default for CylinderShape {
 }
 
 /// Cone shape aligned in Y axis.
-#[derive(Clone, Debug, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Clone, Debug, Visit, Reflect, PartialEq)]
 pub struct ConeShape {
     /// Half height of the cone, actual height will be 2 times bigger.
-    #[inspect(min_value = 0.0, step = 0.05)]
+    #[reflect(min_value = 0.0, step = 0.05)]
     pub half_height: f32,
     /// Radius of the cone base.
-    #[inspect(min_value = 0.0, step = 0.05)]
+    #[reflect(min_value = 0.0, step = 0.05)]
     pub radius: f32,
 }
 
@@ -86,7 +87,7 @@ impl Default for ConeShape {
 }
 
 /// Cuboid shape (box).
-#[derive(Clone, Debug, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Clone, Debug, Visit, Reflect, PartialEq)]
 pub struct CuboidShape {
     /// Half extents of the box. X - half width, Y - half height, Z - half depth.
     /// Actual _size_ will be 2 times bigger.
@@ -102,14 +103,14 @@ impl Default for CuboidShape {
 }
 
 /// Arbitrary capsule shape defined by 2 points (which forms axis) and a radius.
-#[derive(Clone, Debug, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Clone, Debug, Visit, Reflect, PartialEq)]
 pub struct CapsuleShape {
     /// Begin point of the capsule.
     pub begin: Vector3<f32>,
     /// End point of the capsule.
     pub end: Vector3<f32>,
     /// Radius of the capsule.
-    #[inspect(min_value = 0.0, step = 0.05)]
+    #[reflect(min_value = 0.0, step = 0.05)]
     pub radius: f32,
 }
 
@@ -125,7 +126,7 @@ impl Default for CapsuleShape {
 }
 
 /// Arbitrary segment shape defined by two points.
-#[derive(Clone, Debug, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Clone, Debug, Visit, Reflect, PartialEq)]
 pub struct SegmentShape {
     /// Begin point of the capsule.
     pub begin: Vector3<f32>,
@@ -143,7 +144,7 @@ impl Default for SegmentShape {
 }
 
 /// Arbitrary triangle shape.
-#[derive(Clone, Debug, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Clone, Debug, Visit, Reflect, PartialEq)]
 pub struct TriangleShape {
     /// First point of the triangle shape.
     pub a: Vector3<f32>,
@@ -168,25 +169,25 @@ impl Default for TriangleShape {
 /// # Notes
 ///
 /// Currently there is only one way to set geometry - using a scene node as a source of data.
-#[derive(Default, Clone, Copy, PartialEq, Hash, Debug, Visit, Inspect, Reflect, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Hash, Debug, Visit, Reflect, Eq)]
 pub struct GeometrySource(pub Handle<Node>);
 
 /// Arbitrary triangle mesh shape.
-#[derive(Default, Clone, Debug, Visit, Inspect, Reflect, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, Visit, Reflect, PartialEq, Eq)]
 pub struct TrimeshShape {
     /// Geometry sources for the shape.
     pub sources: Vec<GeometrySource>,
 }
 
 /// Arbitrary height field shape.
-#[derive(Default, Clone, Debug, Visit, Inspect, Reflect, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, Visit, Reflect, PartialEq, Eq)]
 pub struct HeightfieldShape {
     /// A handle to terrain scene node.
     pub geometry_source: GeometrySource,
 }
 
 /// Arbitrary convex polyhedron shape.
-#[derive(Default, Clone, Debug, Visit, Inspect, Reflect, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, Visit, Reflect, PartialEq, Eq)]
 pub struct ConvexPolyhedronShape {
     /// A handle to a mesh node.
     pub geometry_source: GeometrySource,
@@ -195,12 +196,6 @@ pub struct ConvexPolyhedronShape {
 /// A set of bits used for pairwise collision filtering.
 #[derive(Clone, Copy, Default, PartialEq, Debug, Reflect, Eq)]
 pub struct BitMask(pub u32);
-
-impl Inspect for BitMask {
-    fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        self.0.properties()
-    }
-}
 
 impl Visit for BitMask {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
@@ -303,7 +298,7 @@ impl NumCast for BitMask {
 /// ```ignore
 /// (self.memberships & rhs.filter) != 0 && (rhs.memberships & self.filter) != 0
 /// ```
-#[derive(Visit, Debug, Clone, Copy, PartialEq, Inspect, Reflect, Eq)]
+#[derive(Visit, Debug, Clone, Copy, PartialEq, Reflect, Eq)]
 pub struct InteractionGroups {
     /// Groups memberships.
     pub memberships: BitMask,
@@ -340,9 +335,7 @@ impl From<geometry::InteractionGroups> for InteractionGroups {
 }
 
 /// Possible collider shapes.
-#[derive(
-    Clone, Debug, PartialEq, Visit, Inspect, Reflect, AsRefStr, EnumString, EnumVariantNames,
-)]
+#[derive(Clone, Debug, PartialEq, Visit, Reflect, AsRefStr, EnumString, EnumVariantNames)]
 pub enum ColliderShape {
     /// See [`BallShape`] docs.
     Ball(BallShape),
@@ -452,22 +445,20 @@ impl ColliderShape {
 
 /// Collider is a geometric entity that can be attached to a rigid body to allow participate it
 /// participate in contact generation, collision response and proximity queries.
-#[derive(Inspect, Reflect, Visit, Debug)]
+#[derive(Reflect, Visit, Debug)]
 pub struct Collider {
     base: Base,
 
     #[reflect(setter = "set_shape")]
     pub(crate) shape: InheritableVariable<ColliderShape>,
 
-    #[inspect(min_value = 0.0, step = 0.05)]
-    #[reflect(setter = "set_friction")]
+    #[reflect(min_value = 0.0, step = 0.05, setter = "set_friction")]
     pub(crate) friction: InheritableVariable<f32>,
 
     #[reflect(setter = "set_density")]
     pub(crate) density: InheritableVariable<Option<f32>>,
 
-    #[inspect(min_value = 0.0, step = 0.05)]
-    #[reflect(setter = "set_restitution")]
+    #[reflect(min_value = 0.0, step = 0.05, setter = "set_restitution")]
     pub(crate) restitution: InheritableVariable<f32>,
 
     #[reflect(setter = "set_is_sensor")]
@@ -486,7 +477,6 @@ pub struct Collider {
     pub(crate) restitution_combine_rule: InheritableVariable<CoefficientCombineRule>,
 
     #[visit(skip)]
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) native: Cell<ColliderHandle>,
 }
@@ -536,7 +526,7 @@ impl Clone for Collider {
             solver_groups: self.solver_groups.clone(),
             friction_combine_rule: self.friction_combine_rule.clone(),
             restitution_combine_rule: self.restitution_combine_rule.clone(),
-            // Do not copy.
+            // Do not copy. The copy will have its own native representation (for example - Rapier's collider)
             native: Cell::new(ColliderHandle::invalid()),
         }
     }
@@ -557,7 +547,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn set_shape(&mut self, shape: ColliderShape) -> ColliderShape {
-        self.shape.set(shape)
+        self.shape.set_value_and_mark_modified(shape)
     }
 
     /// Returns shared reference to the collider shape.
@@ -578,7 +568,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn shape_mut(&mut self) -> &mut ColliderShape {
-        self.shape.get_mut()
+        self.shape.get_value_mut_and_mark_modified()
     }
 
     /// Sets the new restitution value. The exact meaning of possible values is somewhat complex,
@@ -591,7 +581,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn set_restitution(&mut self, restitution: f32) -> f32 {
-        self.restitution.set(restitution)
+        self.restitution.set_value_and_mark_modified(restitution)
     }
 
     /// Returns current restitution value of the collider.
@@ -614,7 +604,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn set_density(&mut self, density: Option<f32>) -> Option<f32> {
-        self.density.set(density)
+        self.density.set_value_and_mark_modified(density)
     }
 
     /// Returns current density of the collider.
@@ -632,7 +622,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn set_friction(&mut self, friction: f32) -> f32 {
-        self.friction.set(friction)
+        self.friction.set_value_and_mark_modified(friction)
     }
 
     /// Return current friction of the collider.
@@ -648,7 +638,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn set_collision_groups(&mut self, groups: InteractionGroups) -> InteractionGroups {
-        self.collision_groups.set(groups)
+        self.collision_groups.set_value_and_mark_modified(groups)
     }
 
     /// Returns current collision filtering options.
@@ -664,7 +654,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn set_solver_groups(&mut self, groups: InteractionGroups) -> InteractionGroups {
-        self.solver_groups.set(groups)
+        self.solver_groups.set_value_and_mark_modified(groups)
     }
 
     /// Returns current solver groups.
@@ -681,7 +671,7 @@ impl Collider {
     /// perform collision response, etc. Try avoid calling this method each frame for better
     /// performance.
     pub fn set_is_sensor(&mut self, is_sensor: bool) -> bool {
-        self.is_sensor.set(is_sensor)
+        self.is_sensor.set_value_and_mark_modified(is_sensor)
     }
 
     /// Returns true if the collider is sensor, false - otherwise.
@@ -700,7 +690,7 @@ impl Collider {
         &mut self,
         rule: CoefficientCombineRule,
     ) -> CoefficientCombineRule {
-        self.friction_combine_rule.set(rule)
+        self.friction_combine_rule.set_value_and_mark_modified(rule)
     }
 
     /// Returns current friction combine rule of the collider.
@@ -719,7 +709,8 @@ impl Collider {
         &mut self,
         rule: CoefficientCombineRule,
     ) -> CoefficientCombineRule {
-        self.restitution_combine_rule.set(rule)
+        self.restitution_combine_rule
+            .set_value_and_mark_modified(rule)
     }
 
     /// Returns current restitution combine rule of the collider.
@@ -728,11 +719,21 @@ impl Collider {
     }
 
     /// Returns an iterator that yields contact information for the collider.
+    /// Contacts checks between two regular colliders
     pub fn contacts<'a>(
         &self,
         physics: &'a PhysicsWorld,
     ) -> impl Iterator<Item = ContactPair> + 'a {
         physics.contacts_with(self.native.get())
+    }
+
+    /// Returns an iterator that yields intersection information for the collider.
+    /// Intersections checks between regular colliders and sensor colliders
+    pub fn intersects<'a>(
+        &self,
+        physics: &'a PhysicsWorld,
+    ) -> impl Iterator<Item = IntersectionPair> + 'a {
+        physics.intersections_with(self.native.get())
     }
 
     pub(crate) fn needs_sync_model(&self) -> bool {
@@ -781,6 +782,23 @@ impl NodeTrait for Collider {
         context
             .physics
             .sync_to_collider_node(context.nodes, self_handle, self);
+    }
+
+    fn validate(&self, scene: &Scene) -> Result<(), String> {
+        if scene
+            .graph
+            .try_get(self.parent())
+            .and_then(|p| p.query_component_ref::<RigidBody>())
+            .is_none()
+        {
+            Err(
+                "3D Collider must be a direct child of a 3D Rigid Body node, \
+            otherwise it will not have any effect!"
+                    .to_string(),
+            )
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -899,12 +917,14 @@ impl ColliderBuilder {
 
 #[cfg(test)]
 mod test {
-    use crate::core::reflect::Reflect;
+    use crate::core::{algebra::Vector2, reflect::Reflect};
     use crate::scene::collider::BitMask;
     use crate::scene::{
         base::{test::check_inheritable_properties_equality, BaseBuilder},
         collider::{Collider, ColliderBuilder, ColliderShape, InteractionGroups},
         graph::physics::CoefficientCombineRule,
+        graph::Graph,
+        rigidbody::{RigidBodyBuilder, RigidBodyType},
     };
     use fyrox_core::variable::try_inherit_properties;
 
@@ -930,5 +950,67 @@ mod test {
 
         check_inheritable_properties_equality(&child.base, &parent.base);
         check_inheritable_properties_equality(&child, parent);
+    }
+
+    #[test]
+    fn test_collider_intersect() {
+        let mut graph = Graph::new();
+
+        let mut create_rigid_body = |is_sensor| {
+            let cube_half_size = 0.5;
+            let collider_sensor = ColliderBuilder::new(BaseBuilder::new())
+                .with_shape(ColliderShape::cuboid(
+                    cube_half_size,
+                    cube_half_size,
+                    cube_half_size,
+                ))
+                .with_sensor(is_sensor)
+                .build(&mut graph);
+
+            RigidBodyBuilder::new(BaseBuilder::new().with_children(&[collider_sensor]))
+                .with_body_type(RigidBodyType::Static)
+                .build(&mut graph);
+
+            collider_sensor
+        };
+
+        let collider_sensor = create_rigid_body(true);
+        let collider_non_sensor = create_rigid_body(false);
+
+        // need to call two times for the physics engine to execute
+        graph.update(Vector2::new(800.0, 600.0), 1.0);
+        graph.update(Vector2::new(800.0, 600.0), 1.0);
+
+        // we don't expect contact between regular body and sensor
+        assert_eq!(
+            0,
+            graph[collider_sensor]
+                .as_collider()
+                .contacts(&graph.physics)
+                .count()
+        );
+        assert_eq!(
+            0,
+            graph[collider_non_sensor]
+                .as_collider()
+                .contacts(&graph.physics)
+                .count()
+        );
+
+        // we expect intersection between regular body and sensor
+        assert_eq!(
+            1,
+            graph[collider_sensor]
+                .as_collider()
+                .intersects(&graph.physics)
+                .count()
+        );
+        assert_eq!(
+            1,
+            graph[collider_non_sensor]
+                .as_collider()
+                .intersects(&graph.physics)
+                .count()
+        );
     }
 }

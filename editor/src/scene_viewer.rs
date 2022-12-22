@@ -1,8 +1,7 @@
 use crate::{
     camera::PickingOptions, gui::make_dropdown_list_option,
-    gui::make_dropdown_list_option_with_height, load_image,
-    scene::commands::graph::ScaleNodeCommand, utils::enable_widget, AddModelCommand, AssetItem,
-    AssetKind, BuildProfile, ChangeSelectionCommand, CommandGroup, DropdownListBuilder,
+    gui::make_dropdown_list_option_with_height, load_image, utils::enable_widget, AddModelCommand,
+    AssetItem, AssetKind, BuildProfile, ChangeSelectionCommand, CommandGroup, DropdownListBuilder,
     EditorScene, GameEngine, GraphSelection, InteractionMode, InteractionModeKind, Message, Mode,
     SceneCommand, Selection, SetMeshTextureCommand, Settings,
 };
@@ -23,12 +22,10 @@ use fyrox::{
         canvas::CanvasBuilder,
         decorator::{DecoratorBuilder, DecoratorMessage},
         dropdown_list::DropdownListMessage,
-        formatted_text::WrapMode,
         grid::{Column, GridBuilder, Row},
         image::{ImageBuilder, ImageMessage},
         message::{KeyCode, MessageDirection, MouseButton, UiMessage},
         stack_panel::StackPanelBuilder,
-        text::TextBuilder,
         utils::make_simple_tooltip,
         vec::vec3::{Vec3EditorBuilder, Vec3EditorMessage},
         widget::{WidgetBuilder, WidgetMessage},
@@ -37,11 +34,9 @@ use fyrox::{
         BRUSH_BRIGHT_BLUE, BRUSH_LIGHT, BRUSH_LIGHTER, BRUSH_LIGHTEST, COLOR_DARKEST,
         COLOR_LIGHTEST,
     },
-    resource::{
-        model::ModelInstance,
-        texture::{Texture, TextureState},
-    },
+    resource::texture::{Texture, TextureState},
     scene::{
+        animation::{absm::AnimationBlendingStateMachine, AnimationPlayer},
         camera::{Camera, Projection},
         node::Node,
     },
@@ -50,7 +45,7 @@ use fyrox::{
 use std::sync::mpsc::Sender;
 
 struct PreviewInstance {
-    instance: ModelInstance,
+    instance: Handle<Node>,
     nodes: FxHashSet<Handle<Node>>,
 }
 
@@ -85,22 +80,7 @@ fn make_interaction_mode_button(
 ) -> Handle<UiNode> {
     ButtonBuilder::new(
         WidgetBuilder::new()
-            .with_tooltip(
-                BorderBuilder::new(
-                    WidgetBuilder::new()
-                        .with_max_size(Vector2::new(300.0, f32::MAX))
-                        .with_visibility(false)
-                        .with_child(
-                            TextBuilder::new(
-                                WidgetBuilder::new().with_margin(Thickness::uniform(2.0)),
-                            )
-                            .with_wrap(WrapMode::Word)
-                            .with_text(tooltip)
-                            .build(ctx),
-                        ),
-                )
-                .build(ctx),
-            )
+            .with_tooltip(make_simple_tooltip(ctx, tooltip))
             .with_margin(Thickness::uniform(1.0)),
     )
     .with_back(
@@ -589,11 +569,7 @@ impl SceneViewer {
                         if let Some(preview) = self.preview_instance.take() {
                             let scene = &mut engine.scenes[editor_scene.scene];
 
-                            scene.graph.remove_node(preview.instance.root);
-
-                            for animation in preview.instance.animations {
-                                scene.animations.remove(animation);
-                            }
+                            scene.graph.remove_node(preview.instance);
                         }
                     }
                     WidgetMessage::DragOver(handle) => {
@@ -611,7 +587,7 @@ impl SceneViewer {
                                                 fyrox::core::futures::executor::block_on(
                                                     engine
                                                         .resource_manager
-                                                        .request_model(&relative_path),
+                                                        .request_model(relative_path),
                                                 )
                                             {
                                                 let scene = &mut engine.scenes[editor_scene.scene];
@@ -619,14 +595,34 @@ impl SceneViewer {
                                                 // Instantiate the model.
                                                 let instance = model.instantiate(scene);
 
-                                                for &animation in instance.animations.iter() {
-                                                    scene.animations[animation].set_enabled(true);
-                                                }
+                                                scene.graph[instance]
+                                                    .local_transform_mut()
+                                                    .set_scale(settings.model.instantiation_scale);
 
                                                 let nodes = scene
                                                     .graph
-                                                    .traverse_handle_iter(instance.root)
+                                                    .traverse_handle_iter(instance)
                                                     .collect::<FxHashSet<Handle<Node>>>();
+
+                                                // Disable animations and state machines.
+                                                for handle in nodes.iter() {
+                                                    let node = &mut scene.graph[*handle];
+                                                    if let Some(animation_player) =
+                                                        node.query_component_mut::<AnimationPlayer>()
+                                                    {
+                                                        for animation in animation_player
+                                                            .animations_mut()
+                                                            .get_value_mut_silent()
+                                                            .iter_mut()
+                                                        {
+                                                            animation.set_enabled(false);
+                                                        }
+                                                    } else if let Some(absm) =
+                                                        node.query_component_mut::<AnimationBlendingStateMachine>()
+                                                    {
+                                                        absm.set_enabled(false);
+                                                    }
+                                                }
 
                                                 self.preview_instance =
                                                     Some(PreviewInstance { instance, nodes });
@@ -655,7 +651,7 @@ impl SceneViewer {
                                         only_meshes: false,
                                     })
                                 {
-                                    graph[preview.instance.root]
+                                    graph[preview.instance]
                                         .local_transform_mut()
                                         .set_position(result.position);
                                 } else {
@@ -682,7 +678,7 @@ impl SceneViewer {
                                         let ray = camera.make_ray(rel_pos, frame_size);
 
                                         if let Some(point) = ray.plane_intersection_point(&plane) {
-                                            graph[preview.instance.root]
+                                            graph[preview.instance]
                                                 .local_transform_mut()
                                                 .set_position(point);
                                         }
@@ -915,31 +911,16 @@ impl SceneViewer {
 
                             // Immediately after extract if from the scene to subgraph. This is required to not violate
                             // the rule of one place of execution, only commands allowed to modify the scene.
-                            let sub_graph =
-                                scene.graph.take_reserve_sub_graph(preview.instance.root);
-                            let animations_container = preview
-                                .instance
-                                .animations
-                                .iter()
-                                .map(|&anim| scene.animations.take_reserve(anim))
-                                .collect();
+                            let sub_graph = scene.graph.take_reserve_sub_graph(preview.instance);
 
                             let group = vec![
-                                SceneCommand::new(AddModelCommand::new(
-                                    sub_graph,
-                                    animations_container,
-                                )),
+                                SceneCommand::new(AddModelCommand::new(sub_graph)),
                                 // We also want to select newly instantiated model.
                                 SceneCommand::new(ChangeSelectionCommand::new(
                                     Selection::Graph(GraphSelection::single_or_empty(
-                                        preview.instance.root,
+                                        preview.instance,
                                     )),
                                     editor_scene.selection.clone(),
-                                )),
-                                SceneCommand::new(ScaleNodeCommand::new(
-                                    preview.instance.root,
-                                    Vector3::new(1.0, 1.0, 1.0),
-                                    settings.model.instantiation_scale,
                                 )),
                             ];
 
@@ -963,7 +944,7 @@ impl SceneViewer {
                             use_picking_loop: true,
                             only_meshes: false,
                         }) {
-                            let tex = engine.resource_manager.request_texture(&relative_path);
+                            let tex = engine.resource_manager.request_texture(relative_path);
                             let texture = tex.clone();
                             let texture = texture.state();
                             if let TextureState::Ok(_) = *texture {

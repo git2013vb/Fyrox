@@ -5,12 +5,129 @@ mod std_impls;
 
 pub use fyrox_core_derive::Reflect;
 
-use std::fmt::Debug;
+use std::fmt::{Display, Formatter};
 use std::{
     any::{Any, TypeId},
-    fmt,
+    fmt::{self, Debug},
 };
-use thiserror::Error;
+
+pub mod prelude {
+    pub use super::{FieldInfo, Reflect};
+}
+
+/// A value of a field..
+pub trait FieldValue: Any + 'static {
+    /// Casts `self` to a `&dyn Any`
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl<T: 'static> FieldValue for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// An error that can occur during "type casting"
+#[derive(Debug)]
+pub enum CastError {
+    /// Given type does not match expected.
+    TypeMismatch {
+        /// A name of the field.
+        property_name: String,
+
+        /// Expected type identifier.
+        expected_type_id: TypeId,
+
+        /// Actual type identifier.
+        actual_type_id: TypeId,
+    },
+}
+
+pub struct FieldInfo<'a> {
+    /// A type id of the owner of the property.
+    pub owner_type_id: TypeId,
+
+    /// A name of the property.
+    pub name: &'static str,
+
+    /// A human-readable name of the property.
+    pub display_name: &'static str,
+
+    /// Description of the property.
+    pub description: &'static str,
+
+    /// Type name of the property.
+    pub type_name: &'static str,
+
+    /// An reference to the actual value of the property. This is "non-mangled" reference, which
+    /// means that while `field/fields/field_mut/fields_mut` might return a reference to other value,
+    /// than the actual field, the `value` is guaranteed to be a reference to the real value.
+    pub value: &'a dyn FieldValue,
+
+    /// A property is not meant to be edited.
+    pub read_only: bool,
+
+    /// A minimal value of the property. Works only with numeric properties!
+    pub min_value: Option<f64>,
+
+    /// A minimal value of the property. Works only with numeric properties!
+    pub max_value: Option<f64>,
+
+    /// A minimal value of the property. Works only with numeric properties!
+    pub step: Option<f64>,
+
+    /// Maximum amount of decimal places for a numeric property.
+    pub precision: Option<usize>,
+}
+
+impl<'a> FieldInfo<'a> {
+    /// Tries to cast a value to a given type.
+    pub fn cast_value<T: 'static>(&self) -> Result<&T, CastError> {
+        match self.value.as_any().downcast_ref::<T>() {
+            Some(value) => Ok(value),
+            None => Err(CastError::TypeMismatch {
+                property_name: self.name.to_string(),
+                expected_type_id: TypeId::of::<T>(),
+                actual_type_id: self.value.type_id(),
+            }),
+        }
+    }
+}
+
+impl<'a> fmt::Debug for FieldInfo<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PropertyInfo")
+            .field("owner_type_id", &self.owner_type_id)
+            .field("name", &self.name)
+            .field("display_name", &self.display_name)
+            .field("value", &format_args!("{:?}", self.value as *const _))
+            .field("read_only", &self.read_only)
+            .field("min_value", &self.min_value)
+            .field("max_value", &self.max_value)
+            .field("step", &self.step)
+            .field("precision", &self.precision)
+            .field("description", &self.description)
+            .finish()
+    }
+}
+
+impl<'a> PartialEq<Self> for FieldInfo<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        let value_ptr_a = self.value as *const _ as *const ();
+        let value_ptr_b = other.value as *const _ as *const ();
+
+        self.owner_type_id == other.owner_type_id
+            && self.name == other.name
+            && self.display_name == other.display_name
+            && std::ptr::eq(value_ptr_a, value_ptr_b)
+            && self.read_only == other.read_only
+            && self.min_value == other.min_value
+            && self.max_value == other.max_value
+            && self.step == other.step
+            && self.precision == other.precision
+            && self.description == other.description
+    }
+}
 
 /// Trait for runtime reflection
 ///
@@ -22,9 +139,11 @@ use thiserror::Error;
 ///
 /// # Field attributes
 /// - `#[reflect(deref)]`: Delegate the field access with deref
-/// - `#[reflect(field = <method call>)]
-/// - `#[reflect(field_mut = <method call>)]
+/// - `#[reflect(field = <method call>)]`
+/// - `#[reflect(field_mut = <method call>)]`
 pub trait Reflect: Any {
+    fn fields_info(&self) -> Vec<FieldInfo>;
+
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 
     fn as_any(&self) -> &dyn Any;
@@ -144,25 +263,47 @@ pub trait ReflectInheritableVariable: Reflect + Debug {
 }
 
 /// An error returned from a failed path string query.
-#[derive(Debug, PartialEq, Eq, Error)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ReflectPathError<'a> {
     // syntax errors
-    #[error("unclosed brackets: `{s}`")]
     UnclosedBrackets { s: &'a str },
-    #[error("not index syntax: `{s}`")]
     InvalidIndexSyntax { s: &'a str },
 
     // access errors
-    #[error("given unknown field: `{s}`")]
     UnknownField { s: &'a str },
-    #[error("no item for index: `{s}`")]
     NoItemForIndex { s: &'a str },
 
     // type cast errors
-    #[error("failed to downcast to the target type after path resolution")]
     InvalidDowncast,
-    #[error("tried to resolve index access, but the reflect type does not implement list API")]
     NotAnArray,
+}
+
+impl<'a> Display for ReflectPathError<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ReflectPathError::UnclosedBrackets { s } => {
+                write!(f, "unclosed brackets: `{s}`")
+            }
+            ReflectPathError::InvalidIndexSyntax { s } => {
+                write!(f, "not index syntax: `{s}`")
+            }
+            ReflectPathError::UnknownField { s } => {
+                write!(f, "given unknown field: `{s}`")
+            }
+            ReflectPathError::NoItemForIndex { s } => {
+                write!(f, "no item for index: `{s}`")
+            }
+            ReflectPathError::InvalidDowncast => {
+                write!(
+                    f,
+                    "failed to downcast to the target type after path resolution"
+                )
+            }
+            ReflectPathError::NotAnArray => {
+                write!(f, "tried to resolve index access, but the reflect type does not implement list API")
+            }
+        }
+    }
 }
 
 pub trait ResolvePath {
@@ -357,6 +498,14 @@ impl ResolvePath for dyn Reflect {
     }
 }
 
+pub enum SetFieldByPathError<'p> {
+    InvalidPath {
+        value: Box<dyn Reflect>,
+        reason: ReflectPathError<'p>,
+    },
+    InvalidValue(Box<dyn Reflect>),
+}
+
 /// Type-erased API
 impl dyn Reflect {
     pub fn downcast<T: Reflect>(self: Box<dyn Reflect>) -> Result<Box<T>, Box<dyn Reflect>> {
@@ -384,6 +533,33 @@ impl dyn Reflect {
     #[inline]
     pub fn downcast_mut<T: Reflect>(&mut self) -> Option<&mut T> {
         self.as_any_mut().downcast_mut::<T>()
+    }
+
+    /// Sets a field by its path in the given entity. This method always uses [`Reflect::set_field`] which means,
+    /// that it will always call custom property setters.
+    #[inline]
+    pub fn set_field_by_path<'p>(
+        &mut self,
+        path: &'p str,
+        value: Box<dyn Reflect>,
+    ) -> Result<Box<dyn Reflect>, SetFieldByPathError<'p>> {
+        let (parent_entity, field_path) = if let Some(separator_position) = path.rfind('.') {
+            let parent_path = &path[..separator_position];
+            let field = &path[(separator_position + 1)..];
+            let parent_entity = match self.resolve_path_mut(parent_path) {
+                Err(reason) => {
+                    return Err(SetFieldByPathError::InvalidPath { reason, value });
+                }
+                Ok(property) => property,
+            };
+            (parent_entity, field)
+        } else {
+            (self, path)
+        };
+
+        parent_entity
+            .set_field(field_path, value)
+            .map_err(|e| SetFieldByPathError::InvalidValue(e))
     }
 }
 
@@ -416,6 +592,10 @@ impl fmt::Debug for dyn Reflect + 'static + Send {
 #[macro_export]
 macro_rules! blank_reflect {
     () => {
+        fn fields_info(&self) -> Vec<FieldInfo> {
+            vec![]
+        }
+
         fn into_any(self: Box<Self>) -> Box<dyn Any> {
             self
         }
@@ -462,6 +642,10 @@ macro_rules! blank_reflect {
 #[macro_export]
 macro_rules! delegate_reflect {
     () => {
+        fn fields_info(&self) -> Vec<FieldInfo> {
+            self.deref().fields_info()
+        }
+
         fn into_any(self: Box<Self>) -> Box<dyn Any> {
             (*self).into_any()
         }

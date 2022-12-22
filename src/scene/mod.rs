@@ -5,6 +5,7 @@
 //! A `Scene` is a container for graph nodes, animations and physics.
 
 pub mod accel;
+pub mod animation;
 pub mod base;
 pub mod camera;
 pub mod collider;
@@ -14,6 +15,7 @@ pub mod dim2;
 pub mod graph;
 pub mod joint;
 pub mod light;
+pub mod loader;
 pub mod mesh;
 pub mod node;
 pub mod particle_system;
@@ -26,15 +28,12 @@ pub mod transform;
 pub mod visibility;
 
 use crate::{
-    animation::{machine::container::AnimationMachineContainer, AnimationContainer},
     core::{
         algebra::Vector2,
         color::Color,
         futures::future::join_all,
-        inspect::{Inspect, PropertyInfo},
-        instant,
         pool::{Handle, Pool, Ticket},
-        reflect::Reflect,
+        reflect::prelude::*,
         sstorage::ImmutableString,
         visitor::{Visit, VisitError, VisitResult, Visitor},
     },
@@ -61,7 +60,6 @@ use std::{
     ops::{Index, IndexMut},
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 /// A container for navigational meshes.
@@ -142,18 +140,12 @@ impl IndexMut<Handle<Navmesh>> for NavMeshContainer {
 }
 
 /// See module docs.
-#[derive(Debug, Inspect, Reflect)]
+#[derive(Debug, Reflect)]
 pub struct Scene {
     /// Graph is main container for all scene nodes. It calculates global transforms for nodes,
     /// updates them and performs all other important work. See `graph` module docs for more
     /// info.
     pub graph: Graph,
-
-    /// Animations container controls all animation on scene. Each animation can have tracks which
-    /// has handles to graph nodes. See `animation` module docs for more info.
-    #[inspect(skip)]
-    #[reflect(hidden)]
-    pub animations: AnimationContainer,
 
     /// Texture to draw scene to. If empty, scene will be drawn on screen directly.
     /// It is useful to "embed" some scene into other by drawing a quad with this
@@ -162,27 +154,22 @@ pub struct Scene {
     /// main scene you can attach this texture to some quad which will be used as
     /// monitor. Other usage could be previewer of models, like pictogram of character
     /// in real-time strategies, in other words there are plenty of possible uses.
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub render_target: Option<Texture>,
 
     /// Drawing context for simple graphics.
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub drawing_context: SceneDrawingContext,
 
     /// A container for navigational meshes.
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub navmeshes: NavMeshContainer,
 
     /// Current lightmap.
-    #[inspect(skip)]
     #[reflect(hidden)]
     lightmap: Option<Lightmap>,
 
     /// Performance statistics from last `update` call.
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub performance_statistics: PerformanceStatistics,
 
@@ -197,18 +184,12 @@ pub struct Scene {
     /// to false for menu's scene and when you need to open a menu - set it to true and
     /// set `enabled` flag to false for level's scene.
     pub enabled: bool,
-
-    /// A container for animation blending state machines.
-    #[inspect(skip)]
-    #[reflect(hidden)]
-    pub animation_machines: AnimationMachineContainer,
 }
 
 impl Default for Scene {
     fn default() -> Self {
         Self {
             graph: Default::default(),
-            animations: Default::default(),
             render_target: None,
             lightmap: None,
             drawing_context: Default::default(),
@@ -216,7 +197,6 @@ impl Default for Scene {
             performance_statistics: Default::default(),
             ambient_lighting_color: Color::opaque(100, 100, 100),
             enabled: true,
-            animation_machines: Default::default(),
         }
     }
 }
@@ -226,17 +206,13 @@ impl Default for Scene {
 pub struct PerformanceStatistics {
     /// Graph performance statistics.
     pub graph: GraphPerformanceStatistics,
-
-    /// A time which was required to update animations.
-    pub animations_update_time: Duration,
 }
 
 impl Display for PerformanceStatistics {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Animations: {:?}\n\
-            Graph: {:?}\n\
+            "Graph: {:?}\n\
             \tSync Time: {:?}\n\
             \tSound: {:?}\n\
             \tPhysics: {:?}\n\
@@ -246,7 +222,6 @@ impl Display for PerformanceStatistics {
             \t\tSimulation: {:?}\n\
             \t\tRay cast: {:?}\n\
             \tHierarchy: {:?}",
-            self.animations_update_time,
             self.graph.total(),
             self.graph.sync_time,
             self.graph.sound_update_time,
@@ -309,7 +284,7 @@ impl SceneLoader {
             if let Some(shallow_resource) = node.resource.clone() {
                 let resource = resource_manager
                     .clone()
-                    .request_model(&shallow_resource.state().path());
+                    .request_model(shallow_resource.state().path());
                 node.resource = Some(resource.clone());
                 resources.push(resource);
             }
@@ -348,26 +323,8 @@ impl SceneLoader {
         }
         join_all(skybox_textures).await;
 
-        let mut animation_resources = Vec::new();
-        for animation in scene.animations.iter_mut() {
-            animation.restore_resources(resource_manager.clone());
-            if let Some(resource) = animation.resource.as_ref() {
-                animation_resources.push(resource.clone());
-            }
-        }
-        join_all(animation_resources).await;
-
-        let mut animation_machines = Vec::new();
-        for machine in scene.animation_machines.iter_mut() {
-            machine.restore_resources(resource_manager.clone());
-            if let Some(resource) = machine.resource.as_ref() {
-                animation_machines.push(resource.clone());
-            }
-        }
-        join_all(animation_machines).await;
-
         // And do resolve to extract correct graphical data and so on.
-        scene.resolve(resource_manager).await;
+        scene.resolve();
 
         scene
     }
@@ -385,7 +342,6 @@ impl Scene {
         Self {
             // Graph must be created with `new` method because it differs from `default`
             graph: Graph::new(),
-            animations: Default::default(),
             render_target: None,
             lightmap: None,
             drawing_context: Default::default(),
@@ -393,7 +349,6 @@ impl Scene {
             performance_statistics: Default::default(),
             ambient_lighting_color: Color::opaque(100, 100, 100),
             enabled: true,
-            animation_machines: Default::default(),
         }
     }
 
@@ -404,30 +359,14 @@ impl Scene {
     ///
     /// Panics if handle is invalid.
     pub fn remove_node(&mut self, handle: Handle<Node>) {
-        for descendant in self.graph.traverse_handle_iter(handle) {
-            // Remove all associated animations.
-            self.animations.retain(|animation| {
-                for track in animation.get_tracks() {
-                    if track.get_node() == descendant {
-                        return false;
-                    }
-                }
-                true
-            });
-        }
-
         self.graph.remove_node(handle)
     }
 
     /// Synchronizes the state of the scene with external resources.
-    pub async fn resolve(&mut self, resource_manager: ResourceManager) {
+    pub fn resolve(&mut self) {
         Log::writeln(MessageKind::Information, "Starting resolve...");
 
         self.graph.resolve();
-        self.animations.resolve(&self.graph);
-        self.animation_machines
-            .resolve(resource_manager, &mut self.graph, &mut self.animations)
-            .await;
         self.graph.update_hierarchical_data();
 
         // Re-apply lightmap if any. This has to be done after resolve because we must patch surface
@@ -441,8 +380,7 @@ impl Scene {
                 if let Some(mesh) = self.graph[handle].cast_mut::<Mesh>() {
                     for surface in mesh.surfaces() {
                         let data = surface.data();
-                        let key = &*data as *const _ as u64;
-                        unique_data_set.entry(key).or_insert(data);
+                        unique_data_set.entry(data.key()).or_insert(data);
                     }
                 }
             }
@@ -562,18 +500,8 @@ impl Scene {
     /// it updates physics, animations, and each graph node. In most cases there is
     /// no need to call it directly, engine automatically updates all available scenes.
     pub fn update(&mut self, frame_size: Vector2<f32>, dt: f32) {
-        let last = instant::Instant::now();
-        self.animations.update_animations(dt);
-        self.performance_statistics.animations_update_time = instant::Instant::now() - last;
-
         self.graph.update(frame_size, dt);
         self.performance_statistics.graph = self.graph.performance_statistics.clone();
-
-        for machine in self.animation_machines.iter_mut() {
-            machine
-                .evaluate_pose(&self.animations, dt)
-                .apply(&mut self.graph);
-        }
     }
 
     /// Creates deep copy of a scene, filter predicate allows you to filter out nodes
@@ -583,30 +511,10 @@ impl Scene {
         F: FnMut(Handle<Node>, &Node) -> bool,
     {
         let (graph, old_new_map) = self.graph.clone(filter);
-        let mut animations = self.animations.clone();
-        for animation in animations.iter_mut() {
-            // Remove all tracks for nodes that were filtered out.
-            animation.retain_tracks(|track| old_new_map.map.contains_key(&track.get_node()));
-            // Remap track nodes.
-            for track in animation.get_tracks_mut() {
-                track.set_node(old_new_map.map[&track.get_node()]);
-            }
-        }
-
-        let mut animation_machines = self.animation_machines.clone();
-        for machine in animation_machines.iter_mut() {
-            machine.root = old_new_map
-                .map
-                .get(&machine.root)
-                .cloned()
-                .unwrap_or_default();
-        }
 
         (
             Self {
                 graph,
-                animations,
-                animation_machines,
                 // Render target is intentionally not copied, because it does not makes sense - a copy
                 // will redraw frame completely.
                 render_target: Default::default(),
@@ -625,15 +533,11 @@ impl Scene {
         let mut region = visitor.enter_region(region_name)?;
 
         self.graph.visit("Graph", &mut region)?;
-        self.animations.visit("Animations", &mut region)?;
         self.lightmap.visit("Lightmap", &mut region)?;
         self.navmeshes.visit("NavMeshes", &mut region)?;
         self.ambient_lighting_color
             .visit("AmbientLightingColor", &mut region)?;
         self.enabled.visit("Enabled", &mut region)?;
-        let _ = self
-            .animation_machines
-            .visit("AnimationMachines", &mut region);
 
         Ok(())
     }

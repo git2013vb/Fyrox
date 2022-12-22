@@ -1,15 +1,27 @@
 use crate::{
     inspector::editors::{
-        handle::NodeHandlePropertyEditorDefinition, material::MaterialPropertyEditorDefinition,
-        resource::ResourceFieldPropertyEditorDefinition, script::ScriptPropertyEditorDefinition,
+        animation::{
+            AnimationContainerPropertyEditorDefinition, AnimationPropertyEditorDefinition,
+            MachinePropertyEditorDefinition,
+        },
+        handle::NodeHandlePropertyEditorDefinition,
+        material::MaterialPropertyEditorDefinition,
+        resource::ResourceFieldPropertyEditorDefinition,
+        script::ScriptPropertyEditorDefinition,
+        spritesheet::SpriteSheetFramesContainerEditorDefinition,
+        surface::SurfaceDataPropertyEditorDefinition,
         texture::TexturePropertyEditorDefinition,
     },
     Message,
 };
+use fyrox::animation::machine::{PoseNode, State};
 use fyrox::{
     animation::{
-        machine::MachineInstantiationError,
-        spritesheet::{self, FrameBounds, SpriteSheetAnimation},
+        machine::{
+            node::BasePoseNode, BlendAnimations, BlendAnimationsByIndex, BlendPose,
+            IndexedBlendInput, Machine, PlayAnimation, PoseWeight,
+        },
+        AnimationContainer,
     },
     core::{
         futures::executor::block_on,
@@ -17,12 +29,15 @@ use fyrox::{
         pool::{ErasedHandle, Handle},
     },
     gui::inspector::editors::{
-        bit::BitFieldPropertyEditorDefinition, enumeration::EnumPropertyEditorDefinition,
-        inherit::InheritablePropertyEditorDefinition, PropertyEditorDefinitionContainer,
+        bit::BitFieldPropertyEditorDefinition, collection::VecCollectionPropertyEditorDefinition,
+        enumeration::EnumPropertyEditorDefinition, inherit::InheritablePropertyEditorDefinition,
+        inspectable::InspectablePropertyEditorDefinition, PropertyEditorDefinitionContainer,
     },
-    material::shader::{Shader, ShaderError, ShaderState},
+    material::{
+        shader::{Shader, ShaderError, ShaderState},
+        SharedMaterial,
+    },
     resource::{
-        absm::{AbsmResource, AbsmResourceState},
         curve::{CurveResource, CurveResourceError, CurveResourceState},
         model::{MaterialSearchOptions, Model, ModelData, ModelLoadError},
         texture::{
@@ -50,7 +65,10 @@ use fyrox::{
             directional::{CsmOptions, FrustumSplitOptions},
             BaseLight,
         },
-        mesh::{surface::Surface, RenderPath},
+        mesh::{
+            surface::{Surface, SurfaceSharedData},
+            RenderPath,
+        },
         node::{Node, NodeHandle},
         particle_system::{
             emitter::{
@@ -72,10 +90,13 @@ use fyrox::{
 };
 use std::{rc::Rc, sync::mpsc::Sender};
 
+pub mod animation;
 pub mod handle;
 pub mod material;
 pub mod resource;
 pub mod script;
+pub mod spritesheet;
+pub mod surface;
 pub mod texture;
 
 pub fn make_status_enum_editor_definition() -> EnumPropertyEditorDefinition<Status> {
@@ -109,6 +130,7 @@ pub fn make_property_editors_container(
     container.insert(MaterialPropertyEditorDefinition {
         sender: Mutex::new(sender.clone()),
     });
+    container.insert(InheritablePropertyEditorDefinition::<SharedMaterial>::new());
 
     container.register_inheritable_vec_collection::<Handle<Node>>();
     container.insert(NodeHandlePropertyEditorDefinition::new(sender));
@@ -130,18 +152,19 @@ pub fn make_property_editors_container(
     container.insert(EnumPropertyEditorDefinition::<LodGroup>::new_optional());
     container.insert(InheritablePropertyEditorDefinition::<Option<LodGroup>>::new());
 
-    container.register_inheritable_enum::<spritesheet::Status, _>();
+    container.register_inheritable_enum::<fyrox::animation::spritesheet::Status, _>();
 
     container.register_inheritable_inspectable::<LodGroup>();
 
-    container.register_inheritable_inspectable::<SpriteSheetAnimation>();
-    container.register_inheritable_vec_collection::<SpriteSheetAnimation>();
+    container
+        .register_inheritable_inspectable::<fyrox::animation::spritesheet::SpriteSheetAnimation>();
+    container
+        .register_inheritable_vec_collection::<fyrox::animation::spritesheet::SpriteSheetAnimation>(
+        );
 
-    container.register_inheritable_inspectable::<FrameBounds>();
-    container.register_inheritable_vec_collection::<FrameBounds>();
-
-    container.register_inheritable_inspectable::<spritesheet::signal::Signal>();
-    container.register_inheritable_vec_collection::<spritesheet::signal::Signal>();
+    container.register_inheritable_inspectable::<fyrox::animation::spritesheet::signal::Signal>();
+    container
+        .register_inheritable_vec_collection::<fyrox::animation::spritesheet::signal::Signal>();
 
     container.insert(ResourceFieldPropertyEditorDefinition::<
         Model,
@@ -162,15 +185,6 @@ pub fn make_property_editors_container(
     container.insert(InheritablePropertyEditorDefinition::<
         Option<SoundBufferResource>,
     >::new());
-
-    container.insert(ResourceFieldPropertyEditorDefinition::<
-        AbsmResource,
-        AbsmResourceState,
-        MachineInstantiationError,
-    >::new(Rc::new(|resource_manager, path| {
-        block_on(resource_manager.request_absm(path))
-    })));
-    container.insert(InheritablePropertyEditorDefinition::<Option<AbsmResource>>::new());
 
     container.insert(ResourceFieldPropertyEditorDefinition::<
         CurveResource,
@@ -267,6 +281,32 @@ pub fn make_property_editors_container(
     container.register_inheritable_inspectable::<HeightfieldShape>();
     container.register_inheritable_inspectable::<dim2::collider::HeightfieldShape>();
     container.register_inheritable_inspectable::<ConvexPolyhedronShape>();
+    container.insert(SpriteSheetFramesContainerEditorDefinition);
+
+    container.insert(SurfaceDataPropertyEditorDefinition);
+    container.insert(InheritablePropertyEditorDefinition::<SurfaceSharedData>::new());
+    container.insert(InheritablePropertyEditorDefinition::<Status>::new());
+
+    container.insert(InspectablePropertyEditorDefinition::<BasePoseNode>::new());
+    container.insert(InspectablePropertyEditorDefinition::<IndexedBlendInput>::new());
+    container.insert(VecCollectionPropertyEditorDefinition::<IndexedBlendInput>::new());
+    container.insert(InspectablePropertyEditorDefinition::<BlendPose>::new());
+    container.insert(VecCollectionPropertyEditorDefinition::<BlendPose>::new());
+    container.insert(EnumPropertyEditorDefinition::<PoseWeight>::new());
+    container.insert(InspectablePropertyEditorDefinition::<BlendAnimationsByIndex>::new());
+    container.insert(InspectablePropertyEditorDefinition::<BlendAnimations>::new());
+    container.insert(InspectablePropertyEditorDefinition::<PlayAnimation>::new());
+
+    container.insert(InspectablePropertyEditorDefinition::<Handle<PoseNode>>::new());
+    container.insert(InspectablePropertyEditorDefinition::<Handle<State>>::new());
+
+    container.insert(AnimationPropertyEditorDefinition);
+
+    container.insert(AnimationContainerPropertyEditorDefinition);
+    container.insert(InheritablePropertyEditorDefinition::<AnimationContainer>::new());
+
+    container.insert(MachinePropertyEditorDefinition);
+    container.insert(InheritablePropertyEditorDefinition::<Machine>::new());
 
     container
 }

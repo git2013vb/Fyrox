@@ -1,23 +1,31 @@
-use crate::absm::command::blend::SetBlendAnimationsPoseSourceCommand;
 use crate::{
     absm::{
         canvas::{AbsmCanvasBuilder, AbsmCanvasMessage},
         command::{
-            blend::SetBlendAnimationByIndexInputPoseSourceCommand, AbsmCommand,
-            ChangeSelectionCommand, CommandGroup, MovePoseNodeCommand,
+            blend::{
+                SetBlendAnimationByIndexInputPoseSourceCommand, SetBlendAnimationsPoseSourceCommand,
+            },
+            MovePoseNodeCommand,
         },
         connection::{Connection, ConnectionBuilder},
-        message::MessageSender,
+        fetch_selection,
         node::{AbsmNode, AbsmNodeBuilder, AbsmNodeMessage},
+        selection::{AbsmSelection, SelectedEntity},
         socket::{Socket, SocketBuilder, SocketDirection},
         state_viewer::context::{CanvasContextMenu, ConnectionContextMenu, NodeContextMenu},
-        AbsmDataModel, SelectedEntity, NORMAL_BACKGROUND, NORMAL_ROOT_COLOR, SELECTED_BACKGROUND,
-        SELECTED_ROOT_COLOR,
+        NORMAL_BACKGROUND, NORMAL_ROOT_COLOR, SELECTED_BACKGROUND, SELECTED_ROOT_COLOR,
     },
-    send_sync_message,
+    scene::{
+        commands::{ChangeSelectionCommand, CommandGroup, SceneCommand},
+        EditorScene, Selection,
+    },
+    send_sync_message, Message,
 };
 use fyrox::{
-    animation::machine::{node::PoseNodeDefinition, state::StateDefinition},
+    animation::{
+        machine::{MachineLayer, PoseNode, State},
+        Animation,
+    },
     core::pool::Handle,
     gui::{
         border::BorderBuilder,
@@ -26,24 +34,30 @@ use fyrox::{
         window::{WindowBuilder, WindowMessage, WindowTitle},
         BuildContext, Thickness, UiNode, UserInterface,
     },
+    scene::{
+        animation::{absm::AnimationBlendingStateMachine, AnimationPlayer},
+        graph::Graph,
+        node::Node,
+    },
 };
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::mpsc::Sender};
 
 mod context;
 
 pub struct StateViewer {
     pub window: Handle<UiNode>,
     canvas: Handle<UiNode>,
-    state: Handle<StateDefinition>,
+    state: Handle<State>,
     canvas_context_menu: CanvasContextMenu,
     node_context_menu: NodeContextMenu,
     connection_context_menu: ConnectionContextMenu,
+    last_selection: AbsmSelection,
 }
 
 fn create_socket(
     direction: SocketDirection,
     index: usize,
-    parent_node: Handle<PoseNodeDefinition>,
+    parent_node: Handle<PoseNode>,
     ui: &mut UserInterface,
 ) -> Handle<UiNode> {
     SocketBuilder::new(WidgetBuilder::new().with_margin(Thickness::uniform(2.0)))
@@ -56,7 +70,7 @@ fn create_socket(
 fn create_sockets(
     count: usize,
     direction: SocketDirection,
-    parent_node: Handle<PoseNodeDefinition>,
+    parent_node: Handle<PoseNode>,
     ui: &mut UserInterface,
 ) -> Vec<Handle<UiNode>> {
     (0..count)
@@ -64,12 +78,9 @@ fn create_sockets(
         .collect::<Vec<_>>()
 }
 
-fn fetch_pose_node_model_handle(
-    handle: Handle<UiNode>,
-    ui: &UserInterface,
-) -> Handle<PoseNodeDefinition> {
+fn fetch_pose_node_model_handle(handle: Handle<UiNode>, ui: &UserInterface) -> Handle<PoseNode> {
     ui.node(handle)
-        .query_component::<AbsmNode<PoseNodeDefinition>>()
+        .query_component::<AbsmNode<PoseNode>>()
         .unwrap()
         .model_handle
 }
@@ -77,11 +88,45 @@ fn fetch_pose_node_model_handle(
 fn fetch_socket_pose_node_model_handle(
     handle: Handle<UiNode>,
     ui: &UserInterface,
-) -> Handle<PoseNodeDefinition> {
+) -> Handle<PoseNode> {
     ui.node(handle)
         .query_component::<Socket>()
         .unwrap()
         .parent_node
+}
+
+fn make_play_animation_name(
+    graph: &Graph,
+    absm_node: &AnimationBlendingStateMachine,
+    animation: Handle<Animation>,
+) -> String {
+    if let Some(animation) = graph
+        .try_get_of_type::<AnimationPlayer>(absm_node.animation_player())
+        .and_then(|animation_player| animation_player.animations().try_get(animation))
+    {
+        format!("Play Animation: {}", animation.name())
+    } else {
+        "Play Animation: <UNASSIGNED>".to_owned()
+    }
+}
+
+fn make_pose_node_name(
+    model_ref: &PoseNode,
+    graph: &Graph,
+    absm_node: &AnimationBlendingStateMachine,
+) -> String {
+    match model_ref {
+        PoseNode::PlayAnimation(play_animation) => {
+            make_play_animation_name(graph, absm_node, play_animation.animation)
+        }
+        PoseNode::BlendAnimations(blend_animations) => {
+            format!("Blend {} Animations", blend_animations.pose_sources.len())
+        }
+        PoseNode::BlendAnimationsByIndex(blend_animations_by_index) => format!(
+            "Blend {} Animations By Index",
+            blend_animations_by_index.inputs.len()
+        ),
+    }
 }
 
 impl StateViewer {
@@ -119,24 +164,23 @@ impl StateViewer {
             canvas_context_menu,
             node_context_menu,
             connection_context_menu,
+            last_selection: AbsmSelection::default(),
         }
     }
 
     pub fn set_state(
         &mut self,
-        state: Handle<StateDefinition>,
-        data_model: &AbsmDataModel,
+        state: Handle<State>,
+        absm_node: &AnimationBlendingStateMachine,
+        layer_index: usize,
         ui: &UserInterface,
     ) {
         assert!(state.is_some());
 
         self.state = state;
 
-        let (state_name, exists) = data_model
-            .resource
-            .data_ref()
-            .absm_definition
-            .states
+        let (state_name, exists) = absm_node.machine().layers()[layer_index]
+            .states()
             .try_borrow(self.state)
             .map(|state| {
                 (
@@ -188,404 +232,486 @@ impl StateViewer {
         &mut self,
         message: &UiMessage,
         ui: &mut UserInterface,
-        sender: &MessageSender,
-        data_model: &AbsmDataModel,
+        sender: &Sender<Message>,
+        absm_node_handle: Handle<Node>,
+        absm_node: &AnimationBlendingStateMachine,
+        layer_index: usize,
+        editor_scene: &EditorScene,
     ) {
-        let definition = &data_model.resource.data_ref().absm_definition;
+        let machine = absm_node.machine();
 
-        if message.destination() == self.canvas {
-            if let Some(msg) = message.data::<AbsmCanvasMessage>() {
-                match msg {
-                    AbsmCanvasMessage::CommitDrag { entries } => {
-                        let commands = entries
-                            .iter()
-                            .map(|e| {
-                                let pose_handle = fetch_pose_node_model_handle(e.node, ui);
-                                let new_position = ui.node(e.node).actual_local_position();
-
-                                AbsmCommand::new(MovePoseNodeCommand::new(
-                                    pose_handle,
-                                    e.initial_position,
-                                    new_position,
-                                ))
-                            })
-                            .collect::<Vec<_>>();
-
-                        sender.do_command(CommandGroup::from(commands));
-                    }
-                    AbsmCanvasMessage::SelectionChanged(selection) => {
-                        if message.direction() == MessageDirection::FromWidget {
-                            let selection = selection
+        if let Some(layer) = machine.layers().get(layer_index) {
+            if message.destination() == self.canvas {
+                if let Some(msg) = message.data::<AbsmCanvasMessage>() {
+                    match msg {
+                        AbsmCanvasMessage::CommitDrag { entries } => {
+                            let commands = entries
                                 .iter()
-                                .filter_map(|n| {
-                                    let node_ref = ui.node(*n);
+                                .map(|e| {
+                                    let pose_handle = fetch_pose_node_model_handle(e.node, ui);
+                                    let new_position = ui.node(e.node).actual_local_position();
 
-                                    node_ref
-                                        .query_component::<AbsmNode<PoseNodeDefinition>>()
-                                        .map(|state_node| {
-                                            SelectedEntity::PoseNode(state_node.model_handle)
-                                        })
+                                    SceneCommand::new(MovePoseNodeCommand::new(
+                                        absm_node_handle,
+                                        pose_handle,
+                                        layer_index,
+                                        e.initial_position,
+                                        new_position,
+                                    ))
                                 })
                                 .collect::<Vec<_>>();
 
-                            if !selection.is_empty() && selection != data_model.selection {
-                                sender.do_command(ChangeSelectionCommand { selection });
+                            sender
+                                .send(Message::do_scene_command(CommandGroup::from(commands)))
+                                .unwrap();
+                        }
+                        AbsmCanvasMessage::SelectionChanged(selection) => {
+                            if message.direction() == MessageDirection::FromWidget {
+                                let selection = Selection::Absm(AbsmSelection {
+                                    absm_node_handle,
+                                    layer: layer_index,
+                                    entities: selection
+                                        .iter()
+                                        .filter_map(|n| {
+                                            let node_ref = ui.node(*n);
+
+                                            node_ref.query_component::<AbsmNode<PoseNode>>().map(
+                                                |state_node| {
+                                                    SelectedEntity::PoseNode(
+                                                        state_node.model_handle,
+                                                    )
+                                                },
+                                            )
+                                        })
+                                        .collect::<Vec<_>>(),
+                                });
+
+                                if !selection.is_empty() && selection != editor_scene.selection {
+                                    sender
+                                        .send(Message::do_scene_command(
+                                            ChangeSelectionCommand::new(
+                                                selection,
+                                                editor_scene.selection.clone(),
+                                            ),
+                                        ))
+                                        .unwrap();
+                                }
                             }
                         }
-                    }
-                    AbsmCanvasMessage::CommitConnection {
-                        source_socket,
-                        dest_socket,
-                    } => {
-                        let source_node = fetch_socket_pose_node_model_handle(*source_socket, ui);
+                        AbsmCanvasMessage::CommitConnection {
+                            source_socket,
+                            dest_socket,
+                        } => {
+                            let source_node =
+                                fetch_socket_pose_node_model_handle(*source_socket, ui);
 
-                        let dest_socket_ref =
-                            ui.node(*dest_socket).query_component::<Socket>().unwrap();
-                        let dest_node = fetch_socket_pose_node_model_handle(*dest_socket, ui);
+                            let dest_socket_ref =
+                                ui.node(*dest_socket).query_component::<Socket>().unwrap();
+                            let dest_node = fetch_socket_pose_node_model_handle(*dest_socket, ui);
 
-                        let dest_node_ref = &definition.nodes[dest_node];
-                        match dest_node_ref {
-                            PoseNodeDefinition::PlayAnimation(_) => {}
-                            PoseNodeDefinition::BlendAnimations(_) => {
-                                sender.do_command(SetBlendAnimationsPoseSourceCommand {
-                                    handle: dest_node,
-                                    index: dest_socket_ref.index,
-                                    value: source_node,
-                                });
-                            }
-                            PoseNodeDefinition::BlendAnimationsByIndex(_) => {
-                                sender.do_command(SetBlendAnimationByIndexInputPoseSourceCommand {
-                                    handle: dest_node,
-                                    index: dest_socket_ref.index,
-                                    value: source_node,
-                                });
+                            let dest_node_ref = &layer.nodes()[dest_node];
+                            match dest_node_ref {
+                                PoseNode::PlayAnimation(_) => {}
+                                PoseNode::BlendAnimations(_) => {
+                                    sender
+                                        .send(Message::do_scene_command(
+                                            SetBlendAnimationsPoseSourceCommand {
+                                                node_handle: absm_node_handle,
+                                                layer_index,
+                                                handle: dest_node,
+                                                index: dest_socket_ref.index,
+                                                value: source_node,
+                                            },
+                                        ))
+                                        .unwrap();
+                                }
+                                PoseNode::BlendAnimationsByIndex(_) => {
+                                    sender
+                                        .send(Message::do_scene_command(
+                                            SetBlendAnimationByIndexInputPoseSourceCommand {
+                                                node_handle: absm_node_handle,
+                                                layer_index,
+                                                handle: dest_node,
+                                                index: dest_socket_ref.index,
+                                                value: source_node,
+                                            },
+                                        ))
+                                        .unwrap();
+                                }
                             }
                         }
+                        _ => (),
                     }
-                    _ => (),
                 }
             }
-        }
 
-        self.node_context_menu.handle_ui_message(
-            message,
-            &data_model.selection,
-            definition,
-            sender,
-            ui,
-        );
-        self.canvas_context_menu
-            .handle_ui_message(sender, message, self.state, ui);
-        self.connection_context_menu
-            .handle_ui_message(message, ui, sender, definition);
+            self.node_context_menu.handle_ui_message(
+                message,
+                layer,
+                sender,
+                ui,
+                editor_scene,
+                absm_node_handle,
+                layer_index,
+            );
+            self.canvas_context_menu.handle_ui_message(
+                sender,
+                message,
+                self.state,
+                ui,
+                absm_node_handle,
+                layer_index,
+            );
+            self.connection_context_menu.handle_ui_message(
+                message,
+                ui,
+                sender,
+                layer,
+                absm_node_handle,
+                layer_index,
+            );
+        }
     }
 
-    pub fn sync_to_model(&mut self, ui: &mut UserInterface, data_model: &AbsmDataModel) {
-        if self.state.is_none() {
-            return;
-        }
+    pub fn sync_to_model(
+        &mut self,
+        ui: &mut UserInterface,
+        machine_layer: &MachineLayer,
+        editor_scene: &EditorScene,
+        absm_node: &AnimationBlendingStateMachine,
+        graph: &Graph,
+    ) {
+        if let Some(parent_state_ref) = machine_layer.states().try_borrow(self.state) {
+            let current_selection = fetch_selection(&editor_scene.selection);
 
-        let definition = &data_model.resource.data_ref().absm_definition;
+            let mut views = Vec::new();
+            if current_selection.layer != self.last_selection.layer
+                || current_selection.absm_node_handle != self.last_selection.absm_node_handle
+            {
+                self.last_selection = current_selection.clone();
+                self.clear(ui);
+            } else {
+                views = ui
+                    .node(self.canvas)
+                    .children()
+                    .iter()
+                    .cloned()
+                    .filter(|h| {
+                        if let Some(pose_node) = ui.node(*h).query_component::<AbsmNode<PoseNode>>()
+                        {
+                            if machine_layer
+                                .nodes()
+                                .try_borrow(pose_node.model_handle)
+                                .map_or(false, |node| node.parent_state == self.state)
+                            {
+                                true
+                            } else {
+                                // Remove every node that does not belong to a state or its data model was
+                                // removed.
+                                ui.send_message(WidgetMessage::remove(
+                                    *h,
+                                    MessageDirection::ToWidget,
+                                ));
 
-        let parent_state_ref = &definition.states[self.state];
-
-        let mut views = ui
-            .node(self.canvas)
-            .children()
-            .iter()
-            .cloned()
-            .filter(|h| {
-                if let Some(pose_node) = ui
-                    .node(*h)
-                    .query_component::<AbsmNode<PoseNodeDefinition>>()
-                {
-                    if definition
-                        .nodes
-                        .try_borrow(pose_node.model_handle)
-                        .map_or(false, |node| node.parent_state == self.state)
-                    {
-                        true
-                    } else {
-                        // Remove every node that does not belong to a state or its data model was
-                        // removed.
-                        ui.send_message(WidgetMessage::remove(*h, MessageDirection::ToWidget));
-
-                        false
-                    }
-                } else {
-                    false
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let models = definition
-            .nodes
-            .pair_iter()
-            .filter_map(|(h, n)| {
-                if n.parent_state == self.state {
-                    Some(h)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        match views.len().cmp(&models.len()) {
-            Ordering::Less => {
-                // A node was added.
-                for &pose_definition in models.iter() {
-                    if views.iter().all(|v| {
-                        ui.node(*v)
-                            .query_component::<AbsmNode<PoseNodeDefinition>>()
-                            .unwrap()
-                            .model_handle
-                            != pose_definition
-                    }) {
-                        let node_ref = &definition.nodes[pose_definition];
-
-                        let (input_socket_count, name, can_add_sockets) = match node_ref {
-                            PoseNodeDefinition::PlayAnimation(_) => {
-                                // No input sockets
-                                (0, "Play Animation", false)
+                                false
                             }
-                            PoseNodeDefinition::BlendAnimations(blend_animations) => (
-                                blend_animations.pose_sources.len(),
-                                "Blend Animations",
-                                true,
-                            ),
-                            PoseNodeDefinition::BlendAnimationsByIndex(blend_animations) => (
-                                blend_animations.inputs.len(),
-                                "Blend Animations By Index",
-                                true,
-                            ),
-                        };
-
-                        let node_view = AbsmNodeBuilder::new(
-                            WidgetBuilder::new()
-                                .with_desired_position(node_ref.position)
-                                .with_context_menu(self.node_context_menu.menu),
-                        )
-                        .with_name("".to_owned())
-                        .with_title(name.to_owned())
-                        .with_can_add_sockets(can_add_sockets)
-                        .with_input_sockets(create_sockets(
-                            input_socket_count,
-                            SocketDirection::Input,
-                            pose_definition,
-                            ui,
-                        ))
-                        .with_output_socket(create_socket(
-                            SocketDirection::Output,
-                            0,
-                            pose_definition,
-                            ui,
-                        ))
-                        .with_normal_color(if pose_definition == parent_state_ref.root {
-                            NORMAL_ROOT_COLOR
                         } else {
-                            NORMAL_BACKGROUND
-                        })
-                        .with_selected_color(if pose_definition == parent_state_ref.root {
-                            SELECTED_ROOT_COLOR
-                        } else {
-                            SELECTED_BACKGROUND
-                        })
-                        .with_model_handle(pose_definition)
-                        .build(&mut ui.build_ctx());
-
-                        send_sync_message(
-                            ui,
-                            WidgetMessage::link(node_view, MessageDirection::ToWidget, self.canvas),
-                        );
-
-                        views.push(node_view);
-                    }
-                }
+                            false
+                        }
+                    })
+                    .collect::<Vec<_>>();
             }
-            Ordering::Greater => {
-                // A node was removed.
-                for &view in views.clone().iter() {
-                    let view_ref = ui
-                        .node(view)
-                        .query_component::<AbsmNode<PoseNodeDefinition>>()
-                        .unwrap();
 
-                    if definition
-                        .nodes
-                        .pair_iter()
-                        .all(|(h, _)| view_ref.model_handle != h)
-                    {
-                        send_sync_message(
-                            ui,
-                            WidgetMessage::remove(view, MessageDirection::ToWidget),
-                        );
+            let models = machine_layer
+                .nodes()
+                .pair_iter()
+                .filter_map(|(h, n)| {
+                    if n.parent_state == self.state {
+                        Some(h)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
 
-                        if let Some(position) = views.iter().position(|s| *s == view) {
-                            views.remove(position);
+            match views.len().cmp(&models.len()) {
+                Ordering::Less => {
+                    // A node was added.
+                    for &pose_definition in models.iter() {
+                        if views.iter().all(|v| {
+                            ui.node(*v)
+                                .query_component::<AbsmNode<PoseNode>>()
+                                .unwrap()
+                                .model_handle
+                                != pose_definition
+                        }) {
+                            let node_ref = &machine_layer.nodes()[pose_definition];
+
+                            let (input_socket_count, name, can_add_sockets) = match node_ref {
+                                PoseNode::PlayAnimation(_) => {
+                                    // No input sockets
+                                    (0, "Play Animation", false)
+                                }
+                                PoseNode::BlendAnimations(blend_animations) => (
+                                    blend_animations.pose_sources.len(),
+                                    "Blend Animations",
+                                    true,
+                                ),
+                                PoseNode::BlendAnimationsByIndex(blend_animations) => (
+                                    blend_animations.inputs.len(),
+                                    "Blend Animations By Index",
+                                    true,
+                                ),
+                            };
+
+                            let node_view = AbsmNodeBuilder::new(
+                                WidgetBuilder::new()
+                                    .with_desired_position(node_ref.position)
+                                    .with_context_menu(self.node_context_menu.menu),
+                            )
+                            .with_name("".to_owned())
+                            .with_title(name.to_owned())
+                            .with_can_add_sockets(can_add_sockets)
+                            .with_input_sockets(create_sockets(
+                                input_socket_count,
+                                SocketDirection::Input,
+                                pose_definition,
+                                ui,
+                            ))
+                            .with_output_socket(create_socket(
+                                SocketDirection::Output,
+                                0,
+                                pose_definition,
+                                ui,
+                            ))
+                            .with_normal_color(if pose_definition == parent_state_ref.root {
+                                NORMAL_ROOT_COLOR
+                            } else {
+                                NORMAL_BACKGROUND
+                            })
+                            .with_selected_color(if pose_definition == parent_state_ref.root {
+                                SELECTED_ROOT_COLOR
+                            } else {
+                                SELECTED_BACKGROUND
+                            })
+                            .with_model_handle(pose_definition)
+                            .build(&mut ui.build_ctx());
+
+                            send_sync_message(
+                                ui,
+                                WidgetMessage::link(
+                                    node_view,
+                                    MessageDirection::ToWidget,
+                                    self.canvas,
+                                ),
+                            );
+
+                            views.push(node_view);
                         }
                     }
                 }
-            }
-            Ordering::Equal => {}
-        }
+                Ordering::Greater => {
+                    // A node was removed.
+                    for &view in views.clone().iter() {
+                        let view_ref = ui
+                            .node(view)
+                            .query_component::<AbsmNode<PoseNode>>()
+                            .unwrap();
 
-        // Sync nodes.
-        for &view in &views {
-            let view_ref = ui
-                .node(view)
-                .query_component::<AbsmNode<PoseNodeDefinition>>()
-                .unwrap();
-            let model_handle = view_ref.model_handle;
-            let model_ref = &definition.nodes[model_handle];
-            let children = model_ref.children();
-            let position = view_ref.actual_local_position();
+                        if machine_layer
+                            .nodes()
+                            .pair_iter()
+                            .all(|(h, _)| view_ref.model_handle != h)
+                        {
+                            send_sync_message(
+                                ui,
+                                WidgetMessage::remove(view, MessageDirection::ToWidget),
+                            );
 
-            if view_ref.base.input_sockets.len() != children.len() {
-                let input_sockets = create_sockets(
-                    children.len(),
-                    SocketDirection::Input,
-                    view_ref.model_handle,
-                    ui,
-                );
-
-                send_sync_message(
-                    ui,
-                    AbsmNodeMessage::input_sockets(view, MessageDirection::ToWidget, input_sockets),
-                );
+                            if let Some(position) = views.iter().position(|s| *s == view) {
+                                views.remove(position);
+                            }
+                        }
+                    }
+                }
+                Ordering::Equal => {}
             }
 
-            if position != model_ref.position {
-                send_sync_message(
-                    ui,
-                    WidgetMessage::desired_position(
-                        view,
-                        MessageDirection::ToWidget,
-                        model_ref.position,
-                    ),
-                );
+            // Sync nodes.
+            for &view in &views {
+                let view_ref = ui
+                    .node(view)
+                    .query_component::<AbsmNode<PoseNode>>()
+                    .unwrap();
+                let model_handle = view_ref.model_handle;
+                let model_ref = &machine_layer.nodes()[model_handle];
+                let children = model_ref.children();
+                let position = view_ref.actual_local_position();
+
+                let new_name = make_pose_node_name(model_ref, graph, absm_node);
+                if new_name != view_ref.name_value {
+                    send_sync_message(
+                        ui,
+                        AbsmNodeMessage::name(view, MessageDirection::ToWidget, new_name),
+                    );
+                }
+
+                if view_ref.base.input_sockets.len() != children.len() {
+                    let input_sockets = create_sockets(
+                        children.len(),
+                        SocketDirection::Input,
+                        view_ref.model_handle,
+                        ui,
+                    );
+
+                    send_sync_message(
+                        ui,
+                        AbsmNodeMessage::input_sockets(
+                            view,
+                            MessageDirection::ToWidget,
+                            input_sockets,
+                        ),
+                    );
+                }
+
+                if position != model_ref.position {
+                    send_sync_message(
+                        ui,
+                        WidgetMessage::desired_position(
+                            view,
+                            MessageDirection::ToWidget,
+                            model_ref.position,
+                        ),
+                    );
+                }
+
+                if model_ref.parent_state == self.state {
+                    send_sync_message(
+                        ui,
+                        AbsmNodeMessage::normal_color(
+                            view,
+                            MessageDirection::ToWidget,
+                            if model_handle == parent_state_ref.root {
+                                NORMAL_ROOT_COLOR
+                            } else {
+                                NORMAL_BACKGROUND
+                            },
+                        ),
+                    );
+                    send_sync_message(
+                        ui,
+                        AbsmNodeMessage::selected_color(
+                            view,
+                            MessageDirection::ToWidget,
+                            if model_handle == parent_state_ref.root {
+                                SELECTED_ROOT_COLOR
+                            } else {
+                                SELECTED_BACKGROUND
+                            },
+                        ),
+                    );
+                }
             }
 
-            if model_ref.parent_state == self.state {
-                send_sync_message(
-                    ui,
-                    AbsmNodeMessage::normal_color(
-                        view,
-                        MessageDirection::ToWidget,
-                        if model_handle == parent_state_ref.root {
-                            NORMAL_ROOT_COLOR
-                        } else {
-                            NORMAL_BACKGROUND
-                        },
-                    ),
-                );
-                send_sync_message(
-                    ui,
-                    AbsmNodeMessage::selected_color(
-                        view,
-                        MessageDirection::ToWidget,
-                        if model_handle == parent_state_ref.root {
-                            SELECTED_ROOT_COLOR
-                        } else {
-                            SELECTED_BACKGROUND
-                        },
-                    ),
-                );
+            // Force update layout to be able to fetch positions of nodes for transitions.
+            ui.update(ui.screen_size(), 0.0);
+
+            // Sync connections - remove old ones and create new. Since there is no separate data model
+            // for connection we can't find which connection has changed and sync only it, instead we
+            // removing every connection and create new.
+            for child in ui.node(self.canvas).children().iter().cloned() {
+                if ui.node(child).has_component::<Connection>() {
+                    ui.send_message(WidgetMessage::remove(child, MessageDirection::ToWidget));
+                }
             }
-        }
 
-        // Force update layout to be able to fetch positions of nodes for transitions.
-        ui.update(ui.screen_size(), 0.0);
+            for model in models.iter().cloned() {
+                let dest_ref = views
+                    .iter()
+                    .filter_map(|v| ui.node(*v).query_component::<AbsmNode<PoseNode>>())
+                    .find(|v| v.model_handle == model)
+                    .unwrap();
+                let dest_handle = dest_ref.handle();
+                let input_sockets = dest_ref.base.input_sockets.clone();
 
-        // Sync connections - remove old ones and create new. Since there is no separate data model
-        // for connection we can't find which connection has changed and sync only it, instead we
-        // removing every connection and create new.
-        for child in ui.node(self.canvas).children().iter().cloned() {
-            if ui.node(child).has_component::<Connection>() {
-                ui.send_message(WidgetMessage::remove(child, MessageDirection::ToWidget));
+                let model_ref = &machine_layer.nodes()[model];
+                for (i, child) in model_ref.children().into_iter().enumerate() {
+                    // Sanity check.
+                    assert_ne!(child, model);
+
+                    if machine_layer.nodes().is_valid_handle(child) {
+                        let source = views
+                            .iter()
+                            .filter_map(|v| ui.node(*v).query_component::<AbsmNode<PoseNode>>())
+                            .find(|v| v.model_handle == child)
+                            .unwrap();
+
+                        let connection = ConnectionBuilder::new(
+                            WidgetBuilder::new()
+                                .with_context_menu(self.connection_context_menu.menu),
+                        )
+                        .with_source_socket(source.base.output_socket)
+                        .with_source_node(source.handle())
+                        .with_dest_socket(input_sockets[i])
+                        .with_dest_node(dest_handle)
+                        .build(self.canvas, &mut ui.build_ctx());
+
+                        send_sync_message(
+                            ui,
+                            WidgetMessage::link(
+                                connection,
+                                MessageDirection::ToWidget,
+                                self.canvas,
+                            ),
+                        );
+                        send_sync_message(
+                            ui,
+                            WidgetMessage::lowermost(connection, MessageDirection::ToWidget),
+                        );
+                    }
+                }
             }
-        }
 
-        for model in models.iter().cloned() {
-            let dest_ref = views
+            // Sync selection.
+            let new_selection = current_selection
+                .entities
                 .iter()
-                .filter_map(|v| {
-                    ui.node(*v)
-                        .query_component::<AbsmNode<PoseNodeDefinition>>()
+                .filter_map(|entry| match entry {
+                    SelectedEntity::Transition(_) | SelectedEntity::State(_) => {
+                        // No such nodes possible to have on this canvas.
+                        None
+                    }
+                    SelectedEntity::PoseNode(pose_node) => views.iter().cloned().find(|s| {
+                        ui.node(*s)
+                            .query_component::<AbsmNode<PoseNode>>()
+                            .unwrap()
+                            .model_handle
+                            == *pose_node
+                    }),
                 })
-                .find(|v| v.model_handle == model)
-                .unwrap();
-            let dest_handle = dest_ref.handle();
-            let input_sockets = dest_ref.base.input_sockets.clone();
+                .collect::<Vec<_>>();
 
-            let model_ref = &definition.nodes[model];
-            for (i, child) in model_ref.children().into_iter().enumerate() {
-                // Sanity check.
-                assert_ne!(child, model);
+            send_sync_message(
+                ui,
+                AbsmCanvasMessage::selection_changed(
+                    self.canvas,
+                    MessageDirection::ToWidget,
+                    new_selection,
+                ),
+            );
 
-                if definition.nodes.is_valid_handle(child) {
-                    let source = views
-                        .iter()
-                        .filter_map(|v| {
-                            ui.node(*v)
-                                .query_component::<AbsmNode<PoseNodeDefinition>>()
-                        })
-                        .find(|v| v.model_handle == child)
-                        .unwrap();
-
-                    let connection = ConnectionBuilder::new(
-                        WidgetBuilder::new().with_context_menu(self.connection_context_menu.menu),
-                    )
-                    .with_source_socket(source.base.output_socket)
-                    .with_source_node(source.handle())
-                    .with_dest_socket(input_sockets[i])
-                    .with_dest_node(dest_handle)
-                    .build(self.canvas, &mut ui.build_ctx());
-
-                    send_sync_message(
-                        ui,
-                        WidgetMessage::link(connection, MessageDirection::ToWidget, self.canvas),
-                    );
-                    send_sync_message(
-                        ui,
-                        WidgetMessage::lowermost(connection, MessageDirection::ToWidget),
-                    );
-                }
+            send_sync_message(
+                ui,
+                AbsmCanvasMessage::force_sync_dependent_objects(
+                    self.canvas,
+                    MessageDirection::ToWidget,
+                ),
+            );
+        } else {
+            // Clean the canvas.
+            for child in ui.node(self.canvas).children() {
+                ui.send_message(WidgetMessage::remove(*child, MessageDirection::ToWidget));
             }
         }
-
-        // Sync selection.
-        let new_selection = data_model
-            .selection
-            .iter()
-            .filter_map(|entry| match entry {
-                SelectedEntity::Transition(_) | SelectedEntity::State(_) => {
-                    // No such nodes possible to have on this canvas.
-                    None
-                }
-                SelectedEntity::PoseNode(pose_node) => views.iter().cloned().find(|s| {
-                    ui.node(*s)
-                        .query_component::<AbsmNode<PoseNodeDefinition>>()
-                        .unwrap()
-                        .model_handle
-                        == *pose_node
-                }),
-            })
-            .collect::<Vec<_>>();
-        send_sync_message(
-            ui,
-            AbsmCanvasMessage::selection_changed(
-                self.canvas,
-                MessageDirection::ToWidget,
-                new_selection,
-            ),
-        );
-
-        send_sync_message(
-            ui,
-            AbsmCanvasMessage::force_sync_dependent_objects(
-                self.canvas,
-                MessageDirection::ToWidget,
-            ),
-        );
     }
 }

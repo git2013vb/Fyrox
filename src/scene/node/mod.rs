@@ -4,13 +4,13 @@
 
 #![warn(missing_docs)]
 
+use crate::scene::Scene;
 use crate::{
     core::{
         algebra::{Matrix4, Vector2},
-        inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::Uuid,
         visitor::{Visit, VisitResult, Visitor},
     },
@@ -81,7 +81,7 @@ pub struct UpdateContext<'a> {
     /// A time that have passed since last update call.
     pub dt: f32,
     /// A reference to a pool with nodes from a scene graph.
-    pub nodes: &'a NodePool,
+    pub nodes: &'a mut NodePool,
     /// A mutable reference to 3D physics world.
     pub physics: &'a mut graph::physics::PhysicsWorld,
     /// A mutable reference to 2D physics world.
@@ -129,7 +129,7 @@ macro_rules! impl_query_component {
 }
 
 /// A main trait for any scene graph node.
-pub trait NodeTrait: BaseNodeTrait + Reflect + Inspect + Visit {
+pub trait NodeTrait: BaseNodeTrait + Reflect + Visit {
     /// Allows a node to provide access to inner components.
     fn query_component_ref(&self, type_id: TypeId) -> Option<&dyn Any>;
 
@@ -161,27 +161,44 @@ pub trait NodeTrait: BaseNodeTrait + Reflect + Inspect + Visit {
 
     /// Gives an opportunity to perform clean up after the node was extracted from the scene graph
     /// (or deleted).
-    fn clean_up(&mut self, _graph: &mut Graph) {}
+    fn clean_up(&mut self, #[allow(unused_variables)] graph: &mut Graph) {}
 
     /// Synchronizes internal state of the node with components of scene graph. It has limited usage
     /// and mostly allows you to sync the state of backing entity with the state of the node.
     /// For example the engine use it to sync native rigid body properties after some property was
     /// changed in the [`crate::scene::rigidbody::RigidBody`] node.  
-    fn sync_native(&self, _self_handle: Handle<Node>, _context: &mut SyncContext) {}
+    fn sync_native(
+        &self,
+        #[allow(unused_variables)] self_handle: Handle<Node>,
+        #[allow(unused_variables)] context: &mut SyncContext,
+    ) {
+    }
 
     /// Called when node's global transform changes.
-    fn sync_transform(&self, _new_global_transform: &Matrix4<f32>, _context: &mut SyncContext) {}
+    fn sync_transform(
+        &self,
+        #[allow(unused_variables)] new_global_transform: &Matrix4<f32>,
+        _context: &mut SyncContext,
+    ) {
+    }
 
     /// Updates internal state of the node and returns true if the node is still alive,
     /// or false - otherwise. "Dead" nodes automatically removed from the parent graph.
     fn update(&mut self, context: &mut UpdateContext) -> bool {
         self.deref_mut().update_lifetime(context.dt)
     }
+
+    /// Validates internal state of a scene node. It can check handles validity, if a handle "points"
+    /// to a node of particular type, if node's parameters are in range, etc. It's main usage is to
+    /// provide centralized diagnostics for scene graph.
+    fn validate(&self, #[allow(unused_variables)] scene: &Scene) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// A small wrapper over `Handle<Node>`. Its main purpose is to provide a convenient way
 /// to handle arrays of handles in the editor.
-#[derive(Reflect, Inspect, Default, Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Reflect, Default, Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct NodeHandle(pub Handle<Node>);
 
@@ -413,11 +430,5 @@ impl Node {
 impl Visit for Node {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         self.0.visit(name, visitor)
-    }
-}
-
-impl Inspect for Node {
-    fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        self.0.properties()
     }
 }

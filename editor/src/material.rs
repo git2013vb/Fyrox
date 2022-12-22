@@ -40,18 +40,18 @@ use fyrox::{
         window::{WindowBuilder, WindowTitle},
         BuildContext, Thickness, UiNode, UserInterface, VerticalAlignment,
     },
-    material::{shader::Shader, Material, PropertyValue},
+    material::{shader::Shader, Material, PropertyValue, SharedMaterial},
     resource::texture::TextureState,
     scene::{
         base::BaseBuilder,
         mesh::{
-            surface::{SurfaceBuilder, SurfaceData},
+            surface::{SurfaceBuilder, SurfaceData, SurfaceSharedData},
             MeshBuilder,
         },
     },
     utils::into_gui_texture,
 };
-use std::sync::{mpsc::Sender, Arc};
+use std::sync::mpsc::Sender;
 
 struct TextureContextMenu {
     popup: Handle<UiNode>,
@@ -87,7 +87,7 @@ pub struct MaterialEditor {
     properties_panel: Handle<UiNode>,
     properties: BiDirHashMap<ImmutableString, Handle<UiNode>>,
     preview: PreviewPanel,
-    material: Option<Arc<Mutex<Material>>>,
+    material: Option<SharedMaterial>,
     available_shaders: Handle<UiNode>,
     shaders_list: Vec<Shader>,
     texture_context_menu: TextureContextMenu,
@@ -235,13 +235,13 @@ fn sync_array_of_arrays<'a, T, I, B>(
 
 impl MaterialEditor {
     pub fn new(engine: &mut GameEngine) -> Self {
-        let mut preview = PreviewPanel::new(engine, 300, 400, false);
+        let mut preview = PreviewPanel::new(engine, 300, 400);
 
         let graph = &mut engine.scenes[preview.scene()].graph;
         let sphere = MeshBuilder::new(BaseBuilder::new())
-            .with_surfaces(vec![SurfaceBuilder::new(Arc::new(Mutex::new(
+            .with_surfaces(vec![SurfaceBuilder::new(SurfaceSharedData::new(
                 SurfaceData::make_sphere(30, 30, 1.0, &Matrix4::identity()),
-            )))
+            ))
             .build()])
             .build(graph);
         preview.set_model(sphere, engine);
@@ -372,11 +372,7 @@ impl MaterialEditor {
         )
     }
 
-    pub fn set_material(
-        &mut self,
-        material: Option<Arc<Mutex<Material>>>,
-        engine: &mut GameEngine,
-    ) {
+    pub fn set_material(&mut self, material: Option<SharedMaterial>, engine: &mut GameEngine) {
         self.material = material;
 
         if let Some(material) = self.material.clone() {
@@ -659,10 +655,7 @@ impl MaterialEditor {
                         }
                         DropdownListMessage::Open => {
                             self.sync_available_shaders_list(engine.resource_manager.clone());
-                            self.create_shaders_items(
-                                &mut engine.user_interface,
-                                &*material.lock(),
-                            );
+                            self.create_shaders_items(&mut engine.user_interface, &material.lock());
                         }
                         _ => (),
                     }
@@ -682,7 +675,8 @@ impl MaterialEditor {
                         .node(self.texture_context_menu.target)
                         .cast::<Image>()
                         .unwrap()
-                        .texture()
+                        .texture
+                        .clone()
                         .and_then(|t| {
                             t.0.downcast::<Mutex<TextureState>>()
                                 .map(|t| t.lock().path().to_path_buf())

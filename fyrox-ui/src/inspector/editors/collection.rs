@@ -1,6 +1,6 @@
 use crate::{
     button::{ButtonBuilder, ButtonMessage},
-    core::{inspect::Inspect, pool::Handle},
+    core::pool::Handle,
     define_constructor,
     inspector::{
         editors::{
@@ -33,9 +33,9 @@ pub struct Item {
     remove: Handle<UiNode>,
 }
 
-pub trait CollectionItem: Inspect + Clone + Reflect + Debug + Default + 'static {}
+pub trait CollectionItem: Clone + Reflect + Debug + Default + 'static {}
 
-impl<T: Inspect + Clone + Reflect + Debug + Default + 'static> CollectionItem for T {}
+impl<T: Clone + Reflect + Debug + Default + 'static> CollectionItem for T {}
 
 #[derive(Debug)]
 pub struct CollectionEditor<T: CollectionItem> {
@@ -155,7 +155,7 @@ impl<T: CollectionItem> Control for CollectionEditor<T> {
                     self.handle,
                     MessageDirection::FromWidget,
                     ObjectValue {
-                        value: Box::new(T::default()),
+                        value: Box::<T>::default(),
                     },
                 ))
             }
@@ -386,7 +386,7 @@ where
         let container = make_expander_container(
             ctx.layer_index,
             ctx.property_info.display_name,
-            ctx.property_info.description.as_ref(),
+            ctx.property_info.description,
             add,
             {
                 editor = CollectionEditorBuilder::new(

@@ -1,14 +1,14 @@
 use crate::{
     create_terrain_layer_material,
     menu::{
-        create_menu_item, create_root_menu_item, dim2::Dim2Menu, physics::PhysicsMenu,
-        physics2d::Physics2dMenu,
+        animation::AnimationMenu, create_menu_item, create_root_menu_item, dim2::Dim2Menu,
+        physics::PhysicsMenu, physics2d::Physics2dMenu,
     },
     scene::commands::graph::AddNodeCommand,
     Message, Mode,
 };
 use fyrox::{
-    core::{algebra::Matrix4, parking_lot::Mutex, pool::Handle},
+    core::{algebra::Matrix4, pool::Handle},
     gui::{
         menu::MenuItemMessage, message::MessageDirection, message::UiMessage,
         widget::WidgetMessage, BuildContext, UiNode, UserInterface,
@@ -22,7 +22,7 @@ use fyrox::{
             BaseLightBuilder,
         },
         mesh::{
-            surface::{Surface, SurfaceData},
+            surface::{Surface, SurfaceData, SurfaceSharedData},
             MeshBuilder,
         },
         node::Node,
@@ -36,7 +36,7 @@ use fyrox::{
         terrain::{LayerDefinition, TerrainBuilder},
     },
 };
-use std::sync::{mpsc::Sender, Arc};
+use std::sync::mpsc::Sender;
 
 pub struct CreateEntityRootMenu {
     pub menu: Handle<UiNode>,
@@ -94,6 +94,7 @@ pub struct CreateEntityMenu {
     physics_menu: PhysicsMenu,
     physics2d_menu: Physics2dMenu,
     dim2_menu: Dim2Menu,
+    animation_menu: AnimationMenu,
 }
 
 impl CreateEntityMenu {
@@ -117,6 +118,7 @@ impl CreateEntityMenu {
         let physics_menu = PhysicsMenu::new(ctx);
         let physics2d_menu = Physics2dMenu::new(ctx);
         let dim2_menu = Dim2Menu::new(ctx);
+        let animation_menu = AnimationMenu::new(ctx);
 
         let items = vec![
             {
@@ -185,6 +187,7 @@ impl CreateEntityMenu {
             physics_menu.menu,
             physics2d_menu.menu,
             dim2_menu.menu,
+            animation_menu.menu,
             {
                 create_camera = create_menu_item("Camera", vec![], ctx);
                 create_camera
@@ -228,6 +231,7 @@ impl CreateEntityMenu {
                 physics_menu,
                 physics2d_menu,
                 dim2_menu,
+                animation_menu,
             },
             items,
         )
@@ -238,14 +242,15 @@ impl CreateEntityMenu {
             .handle_ui_message(message)
             .or_else(|| self.physics2d_menu.handle_ui_message(message))
             .or_else(|| self.dim2_menu.handle_ui_message(message))
+            .or_else(|| self.animation_menu.handle_ui_message(message))
             .or_else(|| {
                 if let Some(MenuItemMessage::Click) = message.data::<MenuItemMessage>() {
                     if message.destination() == self.create_cube {
                         Some(
                             MeshBuilder::new(BaseBuilder::new().with_name("Cube"))
-                                .with_surfaces(vec![Surface::new(Arc::new(Mutex::new(
+                                .with_surfaces(vec![Surface::new(SurfaceSharedData::new(
                                     SurfaceData::make_cube(Matrix4::identity()),
-                                )))])
+                                ))])
                                 .build_node(),
                         )
                     } else if message.destination() == self.create_spot_light {
@@ -278,15 +283,15 @@ impl CreateEntityMenu {
                     } else if message.destination() == self.create_cone {
                         Some(
                             MeshBuilder::new(BaseBuilder::new().with_name("Cone"))
-                                .with_surfaces(vec![Surface::new(Arc::new(Mutex::new(
+                                .with_surfaces(vec![Surface::new(SurfaceSharedData::new(
                                     SurfaceData::make_cone(16, 0.5, 1.0, &Matrix4::identity()),
-                                )))])
+                                ))])
                                 .build_node(),
                         )
                     } else if message.destination() == self.create_cylinder {
                         Some(
                             MeshBuilder::new(BaseBuilder::new().with_name("Cylinder"))
-                                .with_surfaces(vec![Surface::new(Arc::new(Mutex::new(
+                                .with_surfaces(vec![Surface::new(SurfaceSharedData::new(
                                     SurfaceData::make_cylinder(
                                         16,
                                         0.5,
@@ -294,23 +299,23 @@ impl CreateEntityMenu {
                                         true,
                                         &Matrix4::identity(),
                                     ),
-                                )))])
+                                ))])
                                 .build_node(),
                         )
                     } else if message.destination() == self.create_sphere {
                         Some(
                             MeshBuilder::new(BaseBuilder::new().with_name("Sphere"))
-                                .with_surfaces(vec![Surface::new(Arc::new(Mutex::new(
+                                .with_surfaces(vec![Surface::new(SurfaceSharedData::new(
                                     SurfaceData::make_sphere(16, 16, 0.5, &Matrix4::identity()),
-                                )))])
+                                ))])
                                 .build_node(),
                         )
                     } else if message.destination() == self.create_quad {
                         Some(
                             MeshBuilder::new(BaseBuilder::new().with_name("Quad"))
-                                .with_surfaces(vec![Surface::new(Arc::new(Mutex::new(
+                                .with_surfaces(vec![Surface::new(SurfaceSharedData::new(
                                     SurfaceData::make_quad(&Matrix4::identity()),
-                                )))])
+                                ))])
                                 .build_node(),
                         )
                     } else if message.destination() == self.create_camera {

@@ -12,7 +12,7 @@ use crate::{
     core::{algebra::Vector2, futures::executor::block_on, instant, pool::Handle},
     engine::{
         error::EngineError,
-        resource_manager::{container::event::ResourceEvent, ResourceManager},
+        resource_manager::{container::event::ResourceEvent, ResourceManager, ResourceWaitContext},
     },
     event::Event,
     event_loop::{ControlFlow, EventLoop},
@@ -115,6 +115,7 @@ pub struct Engine {
 
 #[derive(Default)]
 struct ScriptProcessor {
+    wait_list: Vec<ResourceWaitContext>,
     scripted_scenes: FxHashSet<Handle<Scene>>,
 }
 
@@ -145,11 +146,8 @@ impl ScriptProcessor {
                 .unwrap();
         }
 
-        // Wait until all resources are fully loaded (or failed to load). It is needed
-        // because some scripts may use resources and any attempt to use non loaded resource
-        // will result in panic.
-        let wait_context = resource_manager.state().containers_mut().wait_concurrent();
-        block_on(wait_context.wait_concurrent());
+        self.wait_list
+            .push(resource_manager.state().containers_mut().get_wait_context());
     }
 
     fn handle_scripts(
@@ -160,6 +158,13 @@ impl ScriptProcessor {
         dt: f32,
         elapsed_time: f32,
     ) {
+        self.wait_list
+            .retain_mut(|context| !context.is_all_loaded());
+
+        if !self.wait_list.is_empty() {
+            return;
+        }
+
         self.scripted_scenes
             .retain(|handle| scenes.is_valid_handle(*handle));
 
@@ -327,7 +332,6 @@ impl ScriptProcessor {
 struct ResourceGraphVertex {
     resource: Model,
     children: Vec<ResourceGraphVertex>,
-    resource_manager: ResourceManager,
 }
 
 impl ResourceGraphVertex {
@@ -359,7 +363,6 @@ impl ResourceGraphVertex {
         Self {
             resource: model,
             children,
-            resource_manager,
         }
     }
 
@@ -371,12 +374,7 @@ impl ResourceGraphVertex {
 
         // Wait until resource is fully loaded, then resolve.
         if block_on(self.resource.clone()).is_ok() {
-            block_on(
-                self.resource
-                    .data_ref()
-                    .get_scene_mut()
-                    .resolve(self.resource_manager.clone()),
-            );
+            self.resource.data_ref().get_scene_mut().resolve();
 
             for child in self.children.iter() {
                 child.resolve();
@@ -426,6 +424,10 @@ where
     // instance.
     let mut script = match context.scene.graph.try_get_mut(context.handle) {
         Some(node) => {
+            if !node.is_globally_enabled() {
+                return;
+            }
+
             if let Some(script) = node.script.take() {
                 script
             } else {
@@ -776,6 +778,7 @@ impl Engine {
                         engine: &self.sound_engine,
                     },
                 };
+
                 for plugin in self.plugins.iter_mut() {
                     plugin.on_ui_message(&mut context, &message, control_flow);
                 }
@@ -865,7 +868,7 @@ impl Engine {
                 // TODO: This might be inefficient if there is bunch of scenes loaded,
                 // however this seems to be very rare case so it should be ok.
                 for scene in self.scenes.iter_mut() {
-                    block_on(scene.resolve(self.resource_manager.clone()));
+                    scene.resolve();
                 }
             }
         }
@@ -987,9 +990,7 @@ impl Drop for Engine {
 #[cfg(test)]
 mod test {
     use crate::{
-        core::{
-            inspect::prelude::*, pool::Handle, reflect::Reflect, uuid::Uuid, visitor::prelude::*,
-        },
+        core::{pool::Handle, reflect::prelude::*, uuid::Uuid, visitor::prelude::*},
         engine::{resource_manager::ResourceManager, ScriptProcessor},
         impl_component_provider,
         scene::{base::BaseBuilder, node::Node, pivot::PivotBuilder, Scene, SceneContainer},
@@ -1005,10 +1006,9 @@ mod test {
         Destroyed(Handle<Node>),
     }
 
-    #[derive(Debug, Clone, Reflect, Inspect, Visit)]
+    #[derive(Debug, Clone, Reflect, Visit)]
     struct MyScript {
         #[reflect(hidden)]
-        #[inspect(skip)]
         #[visit(skip)]
         sender: Sender<Event>,
         spawned: bool,
@@ -1064,10 +1064,9 @@ mod test {
         }
     }
 
-    #[derive(Debug, Clone, Reflect, Inspect, Visit)]
+    #[derive(Debug, Clone, Reflect, Visit)]
     struct MySubScript {
         #[reflect(hidden)]
-        #[inspect(skip)]
         #[visit(skip)]
         sender: Sender<Event>,
     }

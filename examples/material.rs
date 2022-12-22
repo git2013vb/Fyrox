@@ -7,12 +7,13 @@
 pub mod shared;
 
 use crate::shared::create_camera;
+use fyrox::material::SharedMaterial;
+use fyrox::scene::mesh::surface::SurfaceSharedData;
 use fyrox::{
     core::{
         algebra::{Matrix4, Vector3},
         color::Color,
         futures::executor::block_on,
-        parking_lot::Mutex,
         pool::Handle,
         sstorage::ImmutableString,
     },
@@ -37,11 +38,10 @@ use fyrox::{
         Scene,
     },
 };
-use std::sync::Arc;
 
 struct Game {
     debug_text: Handle<UiNode>,
-    material: Arc<Mutex<Material>>,
+    material: SharedMaterial,
     time: f32,
 }
 
@@ -68,7 +68,7 @@ impl Plugin for Game {
     }
 }
 
-fn create_custom_material(resource_manager: ResourceManager) -> Arc<Mutex<Material>> {
+fn create_custom_material(resource_manager: ResourceManager) -> SharedMaterial {
     let shader =
         block_on(resource_manager.request_shader("examples/data/shaders/custom.shader")).unwrap();
 
@@ -84,7 +84,7 @@ fn create_custom_material(resource_manager: ResourceManager) -> Arc<Mutex<Materi
         )
         .unwrap();
 
-    Arc::new(Mutex::new(material))
+    SharedMaterial::new(material)
 }
 
 struct GameConstructor;
@@ -122,9 +122,9 @@ impl PluginConstructor for GameConstructor {
 
         // Add cylinder with custom shader.
         MeshBuilder::new(BaseBuilder::new())
-            .with_surfaces(vec![SurfaceBuilder::new(Arc::new(Mutex::new(
+            .with_surfaces(vec![SurfaceBuilder::new(SurfaceSharedData::new(
                 SurfaceData::make_cylinder(20, 0.75, 2.0, true, &Matrix4::identity()),
-            )))
+            ))
             .with_material(material.clone())
             .build()])
             .build(&mut scene.graph);

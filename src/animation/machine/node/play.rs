@@ -1,31 +1,40 @@
+//! A simplest pose node that extracts pose from a specific animation and prepares it for further use.
+
 use crate::{
     animation::{
         machine::{
-            node::{BasePoseNode, BasePoseNodeDefinition, EvaluatePose},
+            node::{BasePoseNode, EvaluatePose},
             ParameterContainer, PoseNode,
         },
         Animation, AnimationContainer, AnimationPose,
     },
     core::{
-        inspect::{Inspect, PropertyInfo},
         pool::{Handle, Pool},
-        reflect::Reflect,
+        reflect::prelude::*,
         visitor::prelude::*,
     },
 };
-use std::ops::Range;
 use std::{
     cell::{Ref, RefCell},
     ops::{Deref, DerefMut},
 };
 
-/// Machine node that plays specified animation.
-#[derive(Default, Debug, Visit, Clone)]
+/// A simplest pose node that extracts pose from a specific animation and prepares it for further use.
+/// Animation handle should point to an animation in some animation container see [`AnimationContainer`] docs
+/// for more info.
+#[derive(Default, Debug, Visit, Clone, Reflect, PartialEq)]
 pub struct PlayAnimation {
+    /// Base node.
     pub base: BasePoseNode,
+
+    /// A handle to animation.
     pub animation: Handle<Animation>,
+
+    /// Output pose, it contains a filtered (see [`crate::animation::machine::LayerMask`] for more info) pose from
+    /// the animation specified by the `animation` field.
     #[visit(skip)]
-    pub(crate) output_pose: RefCell<AnimationPose>,
+    #[reflect(hidden)]
+    pub output_pose: RefCell<AnimationPose>,
 }
 
 impl Deref for PlayAnimation {
@@ -37,44 +46,6 @@ impl Deref for PlayAnimation {
 }
 
 impl DerefMut for PlayAnimation {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.base
-    }
-}
-
-#[derive(Default, Debug, Visit, Clone, Inspect, Reflect)]
-pub struct TimeSlice(pub Range<f32>);
-
-#[derive(Debug, Visit, Clone, Inspect, Reflect)]
-pub struct PlayAnimationDefinition {
-    pub base: BasePoseNodeDefinition,
-    pub animation: String,
-    #[visit(optional)] // Backward compatibility
-    pub speed: f32,
-    #[visit(optional)] // Backward compatibility
-    pub time_slice: Option<TimeSlice>,
-}
-
-impl Default for PlayAnimationDefinition {
-    fn default() -> Self {
-        Self {
-            base: Default::default(),
-            animation: "".to_string(),
-            speed: 1.0,
-            time_slice: None,
-        }
-    }
-}
-
-impl Deref for PlayAnimationDefinition {
-    type Target = BasePoseNodeDefinition;
-
-    fn deref(&self) -> &Self::Target {
-        &self.base
-    }
-}
-
-impl DerefMut for PlayAnimationDefinition {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.base
     }
@@ -101,7 +72,7 @@ impl EvaluatePose for PlayAnimation {
     ) -> Ref<AnimationPose> {
         if let Some(animation) = animations.try_get(self.animation) {
             animation
-                .get_pose()
+                .pose()
                 .clone_into(&mut self.output_pose.borrow_mut());
         }
         self.output_pose.borrow()

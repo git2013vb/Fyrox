@@ -2,9 +2,8 @@
 
 use crate::{
     core::{
-        inspect::{Inspect, PropertyInfo},
         pool::{Handle, Pool, Ticket},
-        reflect::Reflect,
+        reflect::prelude::*,
         visitor::prelude::*,
     },
     resource::model::Model,
@@ -23,20 +22,18 @@ use fyrox_sound::{
 use std::time::Duration;
 
 /// Sound context.
-#[derive(Debug, Visit, Inspect, Reflect)]
+#[derive(Debug, Visit, Reflect)]
 pub struct SoundContext {
     master_gain: f32,
     renderer: Renderer,
     distance_model: DistanceModel,
     paused: bool,
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) effects: Pool<Effect>,
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     // A model resource from which this context was instantiated from.
     pub(crate) resource: Option<Model>,
     #[visit(skip)]
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) native: fyrox_sound::context::SoundContext,
 }
@@ -227,7 +224,7 @@ impl SoundContext {
                         native_reverb.set_decay_time(Duration::from_secs_f32(reverb.decay_time()));
                         native_reverb.set_dry(reverb.dry());
                         native_reverb.set_wet(reverb.wet());
-                        sync_effect_inputs(&mut *native_reverb, &*reverb.inputs, nodes);
+                        sync_effect_inputs(&mut native_reverb, &reverb.inputs, nodes);
                         let native =
                             state.add_effect(fyrox_sound::effects::Effect::Reverb(native_reverb));
                         reverb.native.set(native);
@@ -250,8 +247,8 @@ impl SoundContext {
     pub(crate) fn sync_with_sound(&self, sound: &mut Sound) {
         if let Some(source) = self.native.state().try_get_source_mut(sound.native.get()) {
             // Sync back.
-            sound.status.set_silent(source.status());
-            sound.playback_time.set_silent(source.playback_time());
+            sound.status.set_value_silent(source.status());
+            sound.playback_time.set_value_silent(source.playback_time());
         }
     }
 
@@ -259,7 +256,9 @@ impl SoundContext {
         if sound.native.get().is_some() {
             let mut state = self.native.state();
             let source = state.source_mut(sound.native.get());
-
+            sound.buffer.try_sync_model(|v| {
+                Log::verify(source.set_buffer(v));
+            });
             sound.max_distance.try_sync_model(|v| {
                 source.set_max_distance(v);
             });
@@ -287,9 +286,6 @@ impl SoundContext {
             sound
                 .spatial_blend
                 .try_sync_model(|v| source.set_spatial_blend(v));
-            sound.buffer.try_sync_model(|v| {
-                Log::verify(source.set_buffer(v));
-            });
             sound.status.try_sync_model(|v| match v {
                 Status::Stopped => {
                     Log::verify(source.stop());
@@ -340,7 +336,7 @@ impl SoundContext {
 
     pub(crate) fn remap_handles(&mut self, old_new_mapping: &NodeHandleMap) {
         for effect in self.effects.iter_mut() {
-            for input in effect.inputs.get_mut_silent().iter_mut() {
+            for input in effect.inputs.get_value_mut_silent().iter_mut() {
                 old_new_mapping.try_map(&mut input.sound);
             }
         }

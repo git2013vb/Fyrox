@@ -10,6 +10,7 @@ use crate::core::algebra::Vector3;
 use crate::core::math::{self, PositionProvider};
 use crate::core::visitor::Visit;
 use fyrox_core::visitor::{VisitResult, Visitor};
+use std::fmt::{Display, Formatter};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum PathVertexState {
@@ -27,6 +28,8 @@ pub struct PathVertex {
     #[visit(skip)]
     state: PathVertexState,
     #[visit(skip)]
+    g_penalty: f32,
+    #[visit(skip)]
     g_score: f32,
     #[visit(skip)]
     f_score: f32,
@@ -40,6 +43,7 @@ impl Default for PathVertex {
         Self {
             position: Default::default(),
             parent: None,
+            g_penalty: 1f32,
             g_score: f32::MAX,
             f_score: f32::MAX,
             state: PathVertexState::NonVisited,
@@ -54,6 +58,7 @@ impl PathVertex {
         Self {
             position,
             parent: None,
+            g_penalty: 1f32,
             g_score: f32::MAX,
             f_score: f32::MAX,
             state: PathVertexState::NonVisited,
@@ -66,7 +71,15 @@ impl PathVertex {
         &self.neighbours
     }
 
+    /// Sets penalty for vertex g_score calculation
+    /// Penalty can be interpreted as measure, how harder is to travel
+    /// to this vertex.
+    pub fn set_penalty(&mut self, new_penalty: f32) {
+        self.g_penalty = new_penalty;
+    }
+
     fn clear(&mut self) {
+        self.g_penalty = 1f32;
         self.g_score = f32::MAX;
         self.f_score = f32::MAX;
         self.state = PathVertexState::NonVisited;
@@ -112,20 +125,33 @@ impl PositionProvider for PathVertex {
 
 /// Path search can be interrupted by errors, this enum stores all possible
 /// kinds of errors.
-#[derive(Clone, Debug, thiserror::Error)]
+#[derive(Clone, Debug)]
 pub enum PathError {
     /// Out-of-bounds vertex index has found, it can be either index of begin/end
     /// points, or some index of neighbour vertices in list of neighbours in vertex.
-    #[error("Invalid vertex index {0}.")]
     InvalidIndex(usize),
 
     /// There is a vertex that has itself as neighbour.
-    #[error("Cyclical reference was found {0}.")]
     CyclicReferenceFound(usize),
 
     /// User-defined error.
-    #[error("An error has occurred {0}")]
     Custom(String),
+}
+
+impl Display for PathError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathError::InvalidIndex(v) => {
+                write!(f, "Invalid vertex index {v}.")
+            }
+            PathError::CyclicReferenceFound(v) => {
+                write!(f, "Cyclical reference was found {v}.")
+            }
+            PathError::Custom(v) => {
+                write!(f, "An error has occurred {v}")
+            }
+        }
+    }
 }
 
 impl PathFinder {
@@ -262,7 +288,8 @@ impl PathFinder {
                     .ok_or(PathError::InvalidIndex(*neighbour_index as usize))?;
 
                 let g_score = current_vertex.g_score
-                    + (current_vertex.position - neighbour.position).norm_squared();
+                    + ((current_vertex.position - neighbour.position).norm_squared()
+                        * neighbour.g_penalty);
                 if g_score < neighbour.g_score {
                     neighbour.parent = Some(current_index);
                     neighbour.g_score = g_score;

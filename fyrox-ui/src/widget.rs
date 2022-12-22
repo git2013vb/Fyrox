@@ -374,7 +374,7 @@ pub struct Widget {
     pub enabled: bool,
     pub cursor: Option<CursorIcon>,
     pub opacity: Option<f32>,
-    pub tooltip: Handle<UiNode>,
+    pub tooltip: Rc<Handle<UiNode>>,
     pub tooltip_time: f32,
     pub context_menu: Handle<UiNode>,
     pub clip_to_bounds: bool,
@@ -578,7 +578,7 @@ impl Widget {
 
     #[inline]
     pub fn set_width(&mut self, width: f32) -> &mut Self {
-        self.width = width.max(self.min_size.x).min(self.max_size.x);
+        self.width = width.clamp(self.min_size.x, self.max_size.x);
         self
     }
 
@@ -593,7 +593,7 @@ impl Widget {
 
     #[inline]
     pub fn set_height(&mut self, height: f32) -> &mut Self {
-        self.height = height.max(self.min_size.y).min(self.max_size.y);
+        self.height = height.clamp(self.min_size.y, self.max_size.y);
         self
     }
 
@@ -1028,12 +1028,12 @@ impl Widget {
     }
 
     #[inline]
-    pub fn tooltip(&self) -> Handle<UiNode> {
-        self.tooltip
+    pub fn tooltip(&self) -> Rc<Handle<UiNode>> {
+        self.tooltip.clone()
     }
 
     #[inline]
-    pub fn set_tooltip(&mut self, tooltip: Handle<UiNode>) -> &mut Self {
+    pub fn set_tooltip(&mut self, tooltip: Rc<Handle<UiNode>>) -> &mut Self {
         self.tooltip = tooltip;
         self
     }
@@ -1106,7 +1106,7 @@ pub struct WidgetBuilder {
     pub enabled: bool,
     pub cursor: Option<CursorIcon>,
     pub opacity: Option<f32>,
-    pub tooltip: Handle<UiNode>,
+    pub tooltip: Rc<Handle<UiNode>>,
     pub tooltip_time: f32,
     pub context_menu: Handle<UiNode>,
     pub preview_messages: bool,
@@ -1149,7 +1149,7 @@ impl WidgetBuilder {
             enabled: true,
             cursor: None,
             opacity: None,
-            tooltip: Handle::default(),
+            tooltip: Default::default(),
             tooltip_time: 0.1,
             context_menu: Handle::default(),
             preview_messages: false,
@@ -1320,9 +1320,9 @@ impl WidgetBuilder {
     ///
     /// ## Important
     ///
-    /// The widget will **own** the tooltip, which means that when widget will be deleted, the
-    /// tooltip will be deleted too.
-    pub fn with_tooltip(mut self, tooltip: Handle<UiNode>) -> Self {
+    /// The widget will share the tooltip, which means that when widget will be deleted, the
+    /// tooltip will be deleted only if there's no one use the tooltip anymore.
+    pub fn with_tooltip(mut self, tooltip: Rc<Handle<UiNode>>) -> Self {
         if tooltip.is_some() {
             self.tooltip = tooltip;
         }

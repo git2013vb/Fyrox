@@ -5,10 +5,10 @@
 use crate::{
     core::{
         algebra::{Matrix4, Vector3},
-        inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, Matrix4Ext},
         pool::{ErasedHandle, Handle},
-        reflect::Reflect,
+        reflect::prelude::*,
+        uuid::Uuid,
         variable::InheritableVariable,
         visitor::{Visit, VisitError, VisitResult, Visitor},
     },
@@ -26,7 +26,7 @@ use std::{
 use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 
 /// A handle to scene node that will be controlled by LOD system.
-#[derive(Inspect, Reflect, Default, Debug, Clone, Copy, PartialEq, Hash, Eq)]
+#[derive(Reflect, Default, Debug, Clone, Copy, PartialEq, Hash, Eq)]
 pub struct LodControlledObject(pub Handle<Node>);
 
 impl Deref for LodControlledObject {
@@ -54,7 +54,7 @@ impl Visit for LodControlledObject {
 /// Normalized distance is a distance in (0; 1) range where 0 - closest to camera,
 /// 1 - farthest. Real distance can be obtained by multiplying normalized distance
 /// with z_far of current projection matrix.
-#[derive(Debug, Default, Clone, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Debug, Default, Clone, Visit, Reflect, PartialEq)]
 pub struct LevelOfDetail {
     begin: f32,
     end: f32,
@@ -73,8 +73,8 @@ impl LevelOfDetail {
         let begin = begin.min(end);
         let end = end.max(begin);
         Self {
-            begin: begin.min(1.0).max(0.0),
-            end: end.min(1.0).max(0.0),
+            begin: begin.clamp(0.0, 1.0),
+            end: end.clamp(0.0, 1.0),
             objects,
         }
     }
@@ -82,7 +82,7 @@ impl LevelOfDetail {
     /// Sets new starting point in distance range. Input value will be clamped in
     /// (0; 1) range.
     pub fn set_begin(&mut self, percent: f32) {
-        self.begin = percent.min(1.0).max(0.0);
+        self.begin = percent.clamp(0.0, 1.0);
         if self.begin > self.end {
             std::mem::swap(&mut self.begin, &mut self.end);
         }
@@ -96,7 +96,7 @@ impl LevelOfDetail {
     /// Sets new end point in distance range. Input value will be clamped in
     /// (0; 1) range.
     pub fn set_end(&mut self, percent: f32) {
-        self.end = percent.min(1.0).max(0.0);
+        self.end = percent.clamp(0.0, 1.0);
         if self.end < self.begin {
             std::mem::swap(&mut self.begin, &mut self.end);
         }
@@ -118,7 +118,7 @@ impl LevelOfDetail {
 /// Lod group must contain non-overlapping cascades, each cascade with its own set of objects
 /// that belongs to level of detail. Engine does not care if you create overlapping cascades,
 /// it is your responsibility to create non-overlapping cascades.
-#[derive(Debug, Default, Clone, Visit, Inspect, Reflect, PartialEq)]
+#[derive(Debug, Default, Clone, Visit, Reflect, PartialEq)]
 pub struct LodGroup {
     /// Set of cascades.
     pub levels: Vec<LevelOfDetail>,
@@ -134,7 +134,6 @@ pub struct LodGroup {
     Ord,
     Eq,
     Debug,
-    Inspect,
     Reflect,
     AsRefStr,
     EnumString,
@@ -202,9 +201,7 @@ impl Visit for Mobility {
 }
 
 /// A property value.
-#[derive(
-    Debug, Visit, Inspect, Reflect, PartialEq, Clone, AsRefStr, EnumString, EnumVariantNames,
-)]
+#[derive(Debug, Visit, Reflect, PartialEq, Clone, AsRefStr, EnumString, EnumVariantNames)]
 pub enum PropertyValue {
     /// A node handle.
     ///
@@ -251,7 +248,7 @@ impl Default for PropertyValue {
 }
 
 /// A custom property.
-#[derive(Debug, Visit, Inspect, Reflect, Default, Clone, PartialEq)]
+#[derive(Debug, Visit, Reflect, Default, Clone, PartialEq)]
 pub struct Property {
     /// Name of the property.
     pub name: String,
@@ -276,6 +273,21 @@ pub enum ScriptMessage {
     },
 }
 
+/// Unique id of the node. It can be shared across multiple resources (read - prefabs), to preserve parent-child
+/// links. It is useful to create various resources that can bind to any instance of the node. For example, an
+/// animation resource could be made for a specific node, but with the `instance_id` it can be retargetted to any
+/// instance of the node. Instance here means: any copy of the node in any resource (including nested prefabs).
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Default, Debug, Reflect)]
+#[repr(transparent)]
+#[reflect(hide_all)]
+pub struct InstanceId(pub Uuid);
+
+impl Visit for InstanceId {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        self.0.visit(name, visitor)
+    }
+}
+
 /// Base scene graph node is a simplest possible node, it is used to build more complex ones using composition.
 /// It contains all fundamental properties for each scene graph nodes, like local and global transforms, name,
 /// lifetime, etc. Base node is a building block for all complex node hierarchies - it contains list of children
@@ -296,13 +308,11 @@ pub enum ScriptMessage {
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Inspect, Reflect)]
+#[derive(Debug, Reflect, Clone)]
 pub struct Base {
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) self_handle: Handle<Node>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) script_message_sender: Option<Sender<ScriptMessage>>,
 
@@ -316,10 +326,10 @@ pub struct Base {
 
     // Maximum amount of Some(time) that node will "live" or None
     // if node has undefined lifetime.
-    #[inspect(skip)] // TEMPORARILY HIDDEN. It causes crashes when set from the editor.
+    #[reflect(hidden)] // TEMPORARILY HIDDEN. It causes crashes when set from the editor.
     pub(crate) lifetime: InheritableVariable<Option<f32>>,
 
-    #[inspect(min_value = 0.0, max_value = 1.0, step = 0.1)]
+    #[reflect(min_value = 0.0, max_value = 1.0, step = 0.1)]
     #[reflect(setter = "set_depth_offset_factor")]
     depth_offset: InheritableVariable<f32>,
 
@@ -344,48 +354,46 @@ pub struct Base {
     #[reflect(setter = "set_frustum_culling")]
     frustum_culling: InheritableVariable<bool>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) transform_modified: Cell<bool>,
 
     // When `true` it means that this node is instance of `resource`.
     // More precisely - this node is root of whole descendant nodes
     // hierarchy which was instantiated from resource.
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     pub(crate) is_resource_instance_root: bool,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) global_visibility: Cell<bool>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) parent: Handle<Node>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) children: Vec<Handle<Node>>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) global_transform: Cell<Matrix4<f32>>,
 
     // Bone-specific matrix. Non-serializable.
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) inv_bind_pose_transform: Matrix4<f32>,
 
     // A resource from which this node was instantiated from, can work in pair
     // with `original` handle to get corresponding node from resource.
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     pub(crate) resource: Option<Model>,
 
     // Handle to node in scene of model resource from which this node
     // was instantiated from.
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     pub(crate) original_handle_in_resource: Handle<Node>,
+
+    #[reflect(read_only)]
+    #[reflect(hidden)]
+    pub(crate) instance_id: InstanceId,
 
     // Current script of the scene node.
     //
@@ -395,43 +403,16 @@ pub struct Base {
     // Use it at your own risk only when you're completely sure what you are doing.
     #[reflect(setter = "set_script_internal")]
     pub(crate) script: Option<Script>,
+
+    enabled: InheritableVariable<bool>,
+
+    #[reflect(hidden)]
+    pub(crate) global_enabled: Cell<bool>,
 }
 
 impl Drop for Base {
     fn drop(&mut self) {
         self.remove_script();
-    }
-}
-
-impl Clone for Base {
-    fn clone(&self) -> Self {
-        Self {
-            self_handle: Default::default(), // Intentionally not copied!
-            script_message_sender: None,     // Intentionally not copied!
-            name: self.name.clone(),
-            local_transform: self.local_transform.clone(),
-            global_transform: self.global_transform.clone(),
-            visibility: self.visibility.clone(),
-            global_visibility: self.global_visibility.clone(),
-            inv_bind_pose_transform: self.inv_bind_pose_transform,
-            resource: self.resource.clone(),
-            original_handle_in_resource: self.original_handle_in_resource,
-            is_resource_instance_root: self.is_resource_instance_root,
-            lifetime: self.lifetime.clone(),
-            mobility: self.mobility.clone(),
-            tag: self.tag.clone(),
-            lod_group: self.lod_group.clone(),
-            properties: self.properties.clone(),
-            frustum_culling: self.frustum_culling.clone(),
-            depth_offset: self.depth_offset.clone(),
-            cast_shadows: self.cast_shadows.clone(),
-            script: self.script.clone(),
-
-            // Rest of data is *not* copied!
-            parent: Default::default(),
-            children: Default::default(),
-            transform_modified: Cell::new(false),
-        }
     }
 }
 
@@ -443,7 +424,7 @@ impl Base {
     }
 
     fn set_name_internal(&mut self, name: String) -> String {
-        self.name.set(name)
+        self.name.set_value_and_mark_modified(name)
     }
 
     /// Returns name of node.
@@ -495,7 +476,10 @@ impl Base {
     /// Sets a new set of properties of the node.
     #[inline]
     pub fn set_properties(&mut self, properties: Vec<Property>) -> Vec<Property> {
-        std::mem::replace(self.properties.get_mut(), properties)
+        std::mem::replace(
+            self.properties.get_value_mut_and_mark_modified(),
+            properties,
+        )
     }
 
     /// Sets lifetime of node in seconds, lifetime is useful for temporary objects.
@@ -509,7 +493,7 @@ impl Base {
     /// or deallocation of node takes very little amount of time.
     #[inline]
     pub fn set_lifetime(&mut self, time_seconds: Option<f32>) -> &mut Self {
-        self.lifetime.set(time_seconds);
+        self.lifetime.set_value_and_mark_modified(time_seconds);
         self
     }
 
@@ -564,7 +548,7 @@ impl Base {
     /// Sets local visibility of a node.
     #[inline]
     pub fn set_visibility(&mut self, visibility: bool) -> bool {
-        self.visibility.set(visibility)
+        self.visibility.set_value_and_mark_modified(visibility)
     }
 
     /// Returns local visibility of a node.
@@ -593,7 +577,7 @@ impl Base {
     /// rendering (dynamic + static lights (lightmaps))
     #[inline]
     pub fn set_mobility(&mut self, mobility: Mobility) -> Mobility {
-        self.mobility.set(mobility)
+        self.mobility.set_value_and_mark_modified(mobility)
     }
 
     /// Return current mobility of the node.
@@ -657,7 +641,8 @@ impl Base {
     /// further perspective divide. We can abuse this to shift z of fragment by some value.
     #[inline]
     pub fn set_depth_offset_factor(&mut self, factor: f32) -> f32 {
-        self.depth_offset.set(factor.abs().min(1.0).max(0.0))
+        self.depth_offset
+            .set_value_and_mark_modified(factor.abs().clamp(0.0, 1.0))
     }
 
     /// Returns depth offset factor.
@@ -669,13 +654,13 @@ impl Base {
     /// Sets new lod group.
     #[inline]
     pub fn set_lod_group(&mut self, lod_group: Option<LodGroup>) -> Option<LodGroup> {
-        std::mem::replace(self.lod_group.get_mut(), lod_group)
+        std::mem::replace(self.lod_group.get_value_mut_and_mark_modified(), lod_group)
     }
 
     /// Extracts lod group, leaving None in the node.
     #[inline]
     pub fn take_lod_group(&mut self) -> Option<LodGroup> {
-        std::mem::take(self.lod_group.get_mut())
+        std::mem::take(self.lod_group.get_value_mut_and_mark_modified())
     }
 
     /// Returns shared reference to current lod group.
@@ -687,7 +672,7 @@ impl Base {
     /// Returns mutable reference to current lod group.
     #[inline]
     pub fn lod_group_mut(&mut self) -> Option<&mut LodGroup> {
-        self.lod_group.get_mut().as_mut()
+        self.lod_group.get_value_mut_and_mark_modified().as_mut()
     }
 
     /// Returns node tag.
@@ -705,7 +690,7 @@ impl Base {
     /// Sets new tag.
     #[inline]
     pub fn set_tag(&mut self, tag: String) -> String {
-        self.tag.set(tag)
+        self.tag.set_value_and_mark_modified(tag)
     }
 
     /// Return the frustum_culling flag
@@ -717,7 +702,8 @@ impl Base {
     /// Sets whether to use frustum culling or not
     #[inline]
     pub fn set_frustum_culling(&mut self, frustum_culling: bool) -> bool {
-        self.frustum_culling.set(frustum_culling)
+        self.frustum_culling
+            .set_value_and_mark_modified(frustum_culling)
     }
 
     /// Returns true if the node should cast shadows, false - otherwise.
@@ -729,7 +715,23 @@ impl Base {
     /// Sets whether the mesh should cast shadows or not.
     #[inline]
     pub fn set_cast_shadows(&mut self, cast_shadows: bool) -> bool {
-        self.cast_shadows.set(cast_shadows)
+        self.cast_shadows.set_value_and_mark_modified(cast_shadows)
+    }
+
+    /// Sets instance id of the node. See [`InstanceId`] for more info.
+    ///
+    /// ## Important notes
+    ///
+    /// Do not change instance id unless you're know for sure what you're doing! Changing the id could result in
+    /// broken parent-child relation between prefabs. This method has very limited usage when you need to override
+    /// the id with some hand-made value.
+    pub fn set_instance_id(&mut self, id: InstanceId) {
+        self.instance_id = id;
+    }
+
+    /// Returns current instance id.
+    pub fn instance_id(&self) -> InstanceId {
+        self.instance_id
     }
 
     fn remove_script(&mut self) {
@@ -821,12 +823,39 @@ impl Base {
 
     /// Updates node lifetime and returns true if the node is still alive, false - otherwise.
     pub(crate) fn update_lifetime(&mut self, dt: f32) -> bool {
-        if let Some(lifetime) = self.lifetime.get_mut_silent().as_mut() {
+        if let Some(lifetime) = self.lifetime.get_value_mut_silent().as_mut() {
             *lifetime -= dt;
             *lifetime >= 0.0
         } else {
             true
         }
+    }
+
+    /// Enables or disables scene node. Disabled scene nodes won't be updated (including scripts) or rendered.
+    ///
+    /// # Important notes
+    ///
+    /// Enabled/disabled state will affect children nodes. It means that if you have a node with children nodes,
+    /// and you disable the node, all children nodes will be disabled too even if their [`Self::is_enabled`] method
+    /// returns `true`.
+    #[inline]
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled.set_value_and_mark_modified(enabled);
+    }
+
+    /// Returns `true` if the node is enabled, `false` - otherwise. The return value does **not** include the state
+    /// of parent nodes. It should be considered as "local" enabled flag. To get actual enabled state, that includes
+    /// the state of parent nodes, use [`Self::is_globally_enabled`] method.
+    #[inline]
+    pub fn is_enabled(&self) -> bool {
+        *self.enabled
+    }
+
+    /// Returns `true` if the node and every parent up in hierarchy is enabled, `false` - otherwise. This method
+    /// returns "true" `enabled` flag. Its value could be different from the value returned by [`Self::is_enabled`].
+    #[inline]
+    pub fn is_globally_enabled(&self) -> bool {
+        self.global_enabled.get()
     }
 
     pub(crate) fn restore_resources(&mut self, resource_manager: ResourceManager) {
@@ -902,6 +931,8 @@ impl Visit for Base {
         let _ = self.properties.visit("Properties", &mut region);
         let _ = self.frustum_culling.visit("FrustumCulling", &mut region);
         let _ = self.cast_shadows.visit("CastShadows", &mut region);
+        let _ = self.instance_id.visit("InstanceId", &mut region);
+        let _ = self.enabled.visit("Enabled", &mut region);
 
         // Script visiting may fail for various reasons:
         //
@@ -938,6 +969,8 @@ pub struct BaseBuilder {
     frustum_culling: bool,
     cast_shadows: bool,
     script: Option<Script>,
+    instance_id: InstanceId,
+    enabled: bool,
 }
 
 impl Default for BaseBuilder {
@@ -964,6 +997,8 @@ impl BaseBuilder {
             frustum_culling: true,
             cast_shadows: true,
             script: None,
+            instance_id: InstanceId(Uuid::new_v4()),
+            enabled: true,
         }
     }
 
@@ -999,6 +1034,12 @@ impl BaseBuilder {
     #[inline]
     pub fn with_inv_bind_pose_transform(mut self, inv_bind_pose: Matrix4<f32>) -> Self {
         self.inv_bind_pose_transform = inv_bind_pose;
+        self
+    }
+
+    /// Enables or disables the scene node.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
         self
     }
 
@@ -1065,6 +1106,12 @@ impl BaseBuilder {
         self
     }
 
+    /// Sets new instance id.
+    pub fn with_instance_id(mut self, id: InstanceId) -> Self {
+        self.instance_id = id;
+        self
+    }
+
     /// Creates an instance of [`Base`].
     #[inline]
     pub fn build_base(self) -> Base {
@@ -1092,6 +1139,9 @@ impl BaseBuilder {
             frustum_culling: self.frustum_culling.into(),
             cast_shadows: self.cast_shadows.into(),
             script: self.script,
+            instance_id: InstanceId(Uuid::new_v4()),
+            enabled: self.enabled.into(),
+            global_enabled: Cell::new(true),
         }
     }
 }
@@ -1099,7 +1149,7 @@ impl BaseBuilder {
 #[cfg(test)]
 pub mod test {
     use crate::{
-        core::{reflect::Reflect, variable::try_inherit_properties},
+        core::{reflect::prelude::*, variable::try_inherit_properties},
         scene::base::{BaseBuilder, LevelOfDetail, LodGroup, Mobility},
     };
 

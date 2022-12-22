@@ -11,11 +11,10 @@
 use crate::{
     core::{
         algebra::{Matrix4, Vector3},
-        inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, m4x4_approx_eq},
         parking_lot::Mutex,
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -39,18 +38,7 @@ use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 
 /// A set of possible types of rigid body.
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Inspect,
-    Reflect,
-    Visit,
-    PartialEq,
-    Eq,
-    Hash,
-    AsRefStr,
-    EnumString,
-    EnumVariantNames,
+    Copy, Clone, Debug, Reflect, Visit, PartialEq, Eq, Hash, AsRefStr, EnumString, EnumVariantNames,
 )]
 #[repr(u32)]
 pub enum RigidBodyType {
@@ -137,7 +125,7 @@ pub(crate) enum ApplyAction {
 ///
 /// Rigid body that does not move for some time will go asleep. This means that the body will not
 /// move unless it is woken up by some other moving body. This feature allows to save CPU resources.
-#[derive(Visit, Inspect, Reflect)]
+#[derive(Visit, Reflect)]
 pub struct RigidBody {
     base: Base,
 
@@ -156,7 +144,7 @@ pub struct RigidBody {
     #[reflect(setter = "set_body_type")]
     pub(crate) body_type: InheritableVariable<RigidBodyType>,
 
-    #[inspect(min_value = 0.0, step = 0.05)]
+    #[reflect(min_value = 0.0, step = 0.05)]
     #[reflect(setter = "set_mass")]
     pub(crate) mass: InheritableVariable<f32>,
 
@@ -185,15 +173,12 @@ pub struct RigidBody {
     pub(crate) gravity_scale: InheritableVariable<f32>,
 
     #[visit(skip)]
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) sleeping: bool,
     #[visit(skip)]
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) native: Cell<RigidBodyHandle>,
     #[visit(skip)]
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) actions: Mutex<VecDeque<ApplyAction>>,
 }
@@ -262,7 +247,7 @@ impl Clone for RigidBody {
             can_sleep: self.can_sleep.clone(),
             dominance: self.dominance.clone(),
             gravity_scale: self.gravity_scale.clone(),
-            // Do not copy.
+            // Do not copy. The copy will have its own native representation.
             native: Cell::new(RigidBodyHandle::invalid()),
             actions: Default::default(),
         }
@@ -279,7 +264,7 @@ impl RigidBody {
     /// Sets new linear velocity of the rigid body. Changing this parameter will wake up the rigid
     /// body!
     pub fn set_lin_vel(&mut self, lin_vel: Vector3<f32>) -> Vector3<f32> {
-        self.lin_vel.set(lin_vel)
+        self.lin_vel.set_value_and_mark_modified(lin_vel)
     }
 
     /// Returns current linear velocity of the rigid body.
@@ -290,7 +275,7 @@ impl RigidBody {
     /// Sets new angular velocity of the rigid body. Changing this parameter will wake up the rigid
     /// body!
     pub fn set_ang_vel(&mut self, ang_vel: Vector3<f32>) -> Vector3<f32> {
-        self.ang_vel.set(ang_vel)
+        self.ang_vel.set_value_and_mark_modified(ang_vel)
     }
 
     /// Returns current angular velocity of the rigid body.
@@ -301,7 +286,7 @@ impl RigidBody {
     /// Sets _additional_ mass of the rigid body. It is called additional because real mass is defined
     /// by colliders attached to the body and their density and volume.
     pub fn set_mass(&mut self, mass: f32) -> f32 {
-        self.mass.set(mass)
+        self.mass.set_value_and_mark_modified(mass)
     }
 
     /// Returns _additional_ mass of the rigid body.
@@ -312,7 +297,7 @@ impl RigidBody {
     /// Sets angular damping of the rigid body. Angular damping will decrease angular velocity over
     /// time. Default is zero.
     pub fn set_ang_damping(&mut self, damping: f32) -> f32 {
-        self.ang_damping.set(damping)
+        self.ang_damping.set_value_and_mark_modified(damping)
     }
 
     /// Returns current angular damping.
@@ -323,7 +308,7 @@ impl RigidBody {
     /// Sets linear damping of the rigid body. Linear damping will decrease linear velocity over
     /// time. Default is zero.
     pub fn set_lin_damping(&mut self, damping: f32) -> f32 {
-        self.lin_damping.set(damping)
+        self.lin_damping.set_value_and_mark_modified(damping)
     }
 
     /// Returns current linear damping.
@@ -333,7 +318,7 @@ impl RigidBody {
 
     /// Locks rotations around X axis in world coordinates.
     pub fn lock_x_rotations(&mut self, state: bool) -> bool {
-        self.x_rotation_locked.set(state)
+        self.x_rotation_locked.set_value_and_mark_modified(state)
     }
 
     /// Returns true if rotation around X axis is locked, false - otherwise.
@@ -343,7 +328,7 @@ impl RigidBody {
 
     /// Locks rotations around Y axis in world coordinates.
     pub fn lock_y_rotations(&mut self, state: bool) -> bool {
-        self.y_rotation_locked.set(state)
+        self.y_rotation_locked.set_value_and_mark_modified(state)
     }
 
     /// Returns true if rotation around Y axis is locked, false - otherwise.    
@@ -353,7 +338,7 @@ impl RigidBody {
 
     /// Locks rotations around Z axis in world coordinates.
     pub fn lock_z_rotations(&mut self, state: bool) -> bool {
-        self.z_rotation_locked.set(state)
+        self.z_rotation_locked.set_value_and_mark_modified(state)
     }
 
     /// Returns true if rotation around Z axis is locked, false - otherwise.    
@@ -363,14 +348,14 @@ impl RigidBody {
 
     /// Locks or unlocks rotations around all axes at once.
     pub fn lock_rotations(&mut self, locked: bool) {
-        self.x_rotation_locked.set(locked);
-        self.y_rotation_locked.set(locked);
-        self.z_rotation_locked.set(locked);
+        self.x_rotation_locked.set_value_and_mark_modified(locked);
+        self.y_rotation_locked.set_value_and_mark_modified(locked);
+        self.z_rotation_locked.set_value_and_mark_modified(locked);
     }
 
     /// Locks translation in world coordinates.
     pub fn lock_translation(&mut self, state: bool) -> bool {
-        self.translation_locked.set(state)
+        self.translation_locked.set_value_and_mark_modified(state)
     }
 
     /// Returns true if translation is locked, false - otherwise.    
@@ -380,7 +365,7 @@ impl RigidBody {
 
     /// Sets new body type. See [`RigidBodyType`] for more info.
     pub fn set_body_type(&mut self, body_type: RigidBodyType) -> RigidBodyType {
-        self.body_type.set(body_type)
+        self.body_type.set_value_and_mark_modified(body_type)
     }
 
     /// Returns current body type.
@@ -402,12 +387,12 @@ impl RigidBody {
     /// Enables or disables continuous collision detection. CCD is very useful for fast moving objects
     /// to prevent accidental penetrations on high velocities.
     pub fn enable_ccd(&mut self, enable: bool) -> bool {
-        self.ccd_enabled.set(enable)
+        self.ccd_enabled.set_value_and_mark_modified(enable)
     }
 
     /// Sets a gravity scale coefficient. Zero can be used to disable gravity.
     pub fn set_gravity_scale(&mut self, scale: f32) -> f32 {
-        self.gravity_scale.set(scale)
+        self.gravity_scale.set_value_and_mark_modified(scale)
     }
 
     /// Returns current gravity scale coefficient.
@@ -420,7 +405,7 @@ impl RigidBody {
     /// mass). This is very importance feature for character physics in games, you can set highest
     /// dominance group to the player, and it won't be affected by any external forces.
     pub fn set_dominance(&mut self, dominance: i8) -> i8 {
-        self.dominance.set(dominance)
+        self.dominance.set_value_and_mark_modified(dominance)
     }
 
     /// Returns current dominance group.
@@ -478,7 +463,7 @@ impl RigidBody {
     /// Sets whether the rigid body can sleep or not. If `false` is passed, it _automatically_ wake
     /// up rigid body.
     pub fn set_can_sleep(&mut self, can_sleep: bool) -> bool {
-        self.can_sleep.set(can_sleep)
+        self.can_sleep.set_value_and_mark_modified(can_sleep)
     }
 
     /// Returns true if the rigid body can sleep, false - otherwise.

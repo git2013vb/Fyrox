@@ -3,8 +3,7 @@
 //! For more info see [`InheritableVariable`]
 
 use crate::{
-    inspect::{Inspect, PropertyInfo},
-    reflect::{Reflect, ReflectArray, ReflectInheritableVariable, ReflectList},
+    reflect::{prelude::*, ReflectArray, ReflectInheritableVariable, ReflectList},
     visitor::prelude::*,
 };
 use bitflags::bitflags;
@@ -148,19 +147,19 @@ impl<T> InheritableVariable<T> {
     }
 
     /// Replaces value and also raises the [`VariableFlags::MODIFIED`] flag.
-    pub fn set(&mut self, value: T) -> T {
+    pub fn set_value_and_mark_modified(&mut self, value: T) -> T {
         self.mark_modified_and_need_sync();
         std::mem::replace(&mut self.value, value)
     }
 
     /// Replaces value and flags.
-    pub fn set_with_flags(&mut self, value: T, flags: VariableFlags) -> T {
+    pub fn set_value_with_flags(&mut self, value: T, flags: VariableFlags) -> T {
         self.flags.set(flags);
         std::mem::replace(&mut self.value, value)
     }
 
     /// Replaces current value without marking the variable modified.
-    pub fn set_silent(&mut self, value: T) -> T {
+    pub fn set_value_silent(&mut self, value: T) -> T {
         std::mem::replace(&mut self.value, value)
     }
 
@@ -170,7 +169,7 @@ impl<T> InheritableVariable<T> {
     }
 
     /// Returns a reference to the wrapped value.
-    pub fn get(&self) -> &T {
+    pub fn get_value_ref(&self) -> &T {
         &self.value
     }
 
@@ -179,7 +178,7 @@ impl<T> InheritableVariable<T> {
     /// # Important notes.
     ///
     /// The method raises `modified` flag, no matter if actual modification was made!
-    pub fn get_mut(&mut self) -> &mut T {
+    pub fn get_value_mut_and_mark_modified(&mut self) -> &mut T {
         self.mark_modified_and_need_sync();
         &mut self.value
     }
@@ -189,7 +188,7 @@ impl<T> InheritableVariable<T> {
     /// # Important notes.
     ///
     /// This method does not mark the value as modified!
-    pub fn get_mut_silent(&mut self) -> &mut T {
+    pub fn get_value_mut_silent(&mut self) -> &mut T {
         &mut self.value
     }
 
@@ -241,19 +240,14 @@ where
     }
 }
 
-impl<T> Inspect for InheritableVariable<T>
-where
-    T: Inspect,
-{
-    fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        self.value.properties()
-    }
-}
-
 impl<T> Reflect for InheritableVariable<T>
 where
     T: Reflect + Clone + PartialEq + Debug,
 {
+    fn fields_info(&self) -> Vec<FieldInfo> {
+        self.value.fields_info()
+    }
+
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
         Box::new(self.value).into_any()
     }
@@ -419,6 +413,22 @@ pub fn try_inherit_properties(
             inheritable_child.inner_value_mut(),
             inheritable_parent.inner_value_ref(),
         )
+    } else if let (Some(child_collection), Some(parent_collection)) =
+        (child.as_array_mut(), parent.as_array())
+    {
+        if child_collection.reflect_len() == parent_collection.reflect_len() {
+            for i in 0..child_collection.reflect_len() {
+                // Sparse arrays (like Pool) could have empty entries.
+                if let (Some(child_item), Some(parent_item)) = (
+                    child_collection.reflect_index_mut(i),
+                    parent_collection.reflect_index(i),
+                ) {
+                    try_inherit_properties(child_item, parent_item)?;
+                }
+            }
+        }
+
+        Ok(())
     } else {
         for (child_field, parent_field) in child.fields_mut().iter_mut().zip(parent.fields()) {
             // If both fields are InheritableVariable<T>, try to inherit.
@@ -451,7 +461,7 @@ pub fn reset_inheritable_properties(object: &mut dyn Reflect) {
 #[cfg(test)]
 mod test {
     use crate::{
-        reflect::{Reflect, ReflectInheritableVariable},
+        reflect::{prelude::*, ReflectInheritableVariable},
         variable::{try_inherit_properties, InheritableVariable},
     };
 
@@ -483,10 +493,12 @@ mod test {
         assert_eq!(parent, child);
 
         // Then modify parent's and child's values.
-        parent.other_value.set("Baz".to_string());
+        parent
+            .other_value
+            .set_value_and_mark_modified("Baz".to_string());
         assert!(ReflectInheritableVariable::is_modified(&parent.other_value),);
 
-        child.foo.value.set(3.21);
+        child.foo.value.set_value_and_mark_modified(3.21);
         assert!(ReflectInheritableVariable::is_modified(&child.foo.value));
 
         try_inherit_properties(&mut child, &parent).unwrap();

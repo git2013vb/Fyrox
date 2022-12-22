@@ -1,22 +1,18 @@
+//! Node is a part of animation blending tree, that backs a state with animation data. See [`PoseNode`] docs for
+//! more info.
+
 use crate::{
     animation::{
         machine::{
-            node::{
-                blend::{
-                    BlendAnimations, BlendAnimationsByIndexDefinition, BlendAnimationsDefinition,
-                },
-                play::{PlayAnimation, PlayAnimationDefinition},
-            },
-            state::StateDefinition,
-            BlendAnimationsByIndex, BlendPose, IndexedBlendInput, ParameterContainer,
+            node::{blend::BlendAnimations, play::PlayAnimation},
+            BlendAnimationsByIndex, BlendPose, IndexedBlendInput, ParameterContainer, State,
         },
         Animation, AnimationContainer, AnimationPose,
     },
     core::{
         algebra::Vector2,
-        inspect::{Inspect, PropertyInfo},
         pool::{Handle, Pool},
-        reflect::Reflect,
+        reflect::prelude::*,
         visitor::prelude::*,
     },
 };
@@ -28,21 +24,27 @@ use std::{
 pub mod blend;
 pub mod play;
 
-#[derive(Debug, Visit, Clone, Default)]
+/// A set of common data fields that is used in every node.
+#[derive(Debug, Visit, Clone, Default, Reflect, PartialEq)]
 pub struct BasePoseNode {
-    pub definition: Handle<PoseNodeDefinition>,
+    /// Position on the canvas, it is editor-specific data.
+    pub position: Vector2<f32>,
+
+    /// A handle of parent state that "owns" the node.
+    #[reflect(hidden)]
+    pub parent_state: Handle<State>,
 }
 
 /// Specialized node that provides animation pose. See documentation for each variant.
-#[derive(Debug, Visit, Clone)]
+#[derive(Debug, Visit, Clone, Reflect, PartialEq)]
 pub enum PoseNode {
-    /// See docs for `PlayAnimation`.
+    /// See docs for [`PlayAnimation`].
     PlayAnimation(PlayAnimation),
 
-    /// See docs for `BlendAnimations`.
+    /// See docs for [`BlendAnimations`].
     BlendAnimations(BlendAnimations),
 
-    /// See docs for `BlendAnimationsByIndex`.
+    /// See docs for [`BlendAnimationsByIndex`].
     BlendAnimationsByIndex(BlendAnimationsByIndex),
 }
 
@@ -53,22 +55,35 @@ impl Default for PoseNode {
 }
 
 impl PoseNode {
-    /// Creates new node that plays animation.
+    /// Creates new node that plays an animation.
     pub fn make_play_animation(animation: Handle<Animation>) -> Self {
         Self::PlayAnimation(PlayAnimation::new(animation))
     }
 
-    /// Creates new node that blends multiple poses.
+    /// Creates new node that blends multiple poses into one.
     pub fn make_blend_animations(poses: Vec<BlendPose>) -> Self {
         Self::BlendAnimations(BlendAnimations::new(poses))
     }
 
-    /// Creates new node that blends multiple poses.
+    /// Creates new node that switches between given animations using index and smoothly blends from
+    /// one animation to another while switching.
     pub fn make_blend_animations_by_index(
         index_parameter: String,
         inputs: Vec<IndexedBlendInput>,
     ) -> Self {
         Self::BlendAnimationsByIndex(BlendAnimationsByIndex::new(index_parameter, inputs))
+    }
+
+    /// Returns a set of handles to children pose nodes.
+    pub fn children(&self) -> Vec<Handle<PoseNode>> {
+        match self {
+            Self::PlayAnimation(_) => {
+                // No children nodes.
+                vec![]
+            }
+            Self::BlendAnimations(definition) => definition.children(),
+            Self::BlendAnimationsByIndex(definition) => definition.children(),
+        }
     }
 }
 
@@ -96,7 +111,9 @@ impl DerefMut for PoseNode {
     }
 }
 
+/// A trait that responsible for animation pose evaluation.
 pub trait EvaluatePose {
+    /// Evaluates animation pose and returns a reference to it.
     fn eval_pose(
         &self,
         nodes: &Pool<PoseNode>,
@@ -105,6 +122,7 @@ pub trait EvaluatePose {
         dt: f32,
     ) -> Ref<AnimationPose>;
 
+    /// Returns a reference to inner pose of a node.
     fn pose(&self) -> Ref<AnimationPose>;
 }
 
@@ -121,60 +139,5 @@ impl EvaluatePose for PoseNode {
 
     fn pose(&self) -> Ref<AnimationPose> {
         static_dispatch!(self, pose,)
-    }
-}
-
-#[derive(Default, Debug, Visit, Clone, Inspect, Reflect)]
-pub struct BasePoseNodeDefinition {
-    pub position: Vector2<f32>,
-    #[inspect(skip)]
-    pub parent_state: Handle<StateDefinition>,
-}
-
-#[derive(Debug, Visit, Clone, Inspect, Reflect)]
-pub enum PoseNodeDefinition {
-    PlayAnimation(PlayAnimationDefinition),
-    BlendAnimations(BlendAnimationsDefinition),
-    BlendAnimationsByIndex(BlendAnimationsByIndexDefinition),
-}
-
-impl PoseNodeDefinition {
-    pub fn children(&self) -> Vec<Handle<PoseNodeDefinition>> {
-        match self {
-            PoseNodeDefinition::PlayAnimation(_) => {
-                // No children nodes.
-                vec![]
-            }
-            PoseNodeDefinition::BlendAnimations(definition) => definition.children(),
-            PoseNodeDefinition::BlendAnimationsByIndex(definition) => definition.children(),
-        }
-    }
-}
-
-impl Default for PoseNodeDefinition {
-    fn default() -> Self {
-        Self::PlayAnimation(Default::default())
-    }
-}
-
-impl Deref for PoseNodeDefinition {
-    type Target = BasePoseNodeDefinition;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            PoseNodeDefinition::PlayAnimation(v) => v,
-            PoseNodeDefinition::BlendAnimations(v) => v,
-            PoseNodeDefinition::BlendAnimationsByIndex(v) => v,
-        }
-    }
-}
-
-impl DerefMut for PoseNodeDefinition {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            PoseNodeDefinition::PlayAnimation(v) => v,
-            PoseNodeDefinition::BlendAnimations(v) => v,
-            PoseNodeDefinition::BlendAnimationsByIndex(v) => v,
-        }
     }
 }

@@ -1,10 +1,10 @@
 use fyrox::{
-    core::{algebra::Vector2, pool::Handle},
+    core::{algebra::Vector2, pool::ErasedHandle, pool::Handle},
     gui::{
-        file_browser::{FileBrowserMode, FileSelectorBuilder, FileSelectorMessage, Filter},
+        file_browser::{FileBrowserMode, FileSelectorBuilder, Filter},
         message::MessageDirection,
         widget::{WidgetBuilder, WidgetMessage},
-        window::{Window, WindowBuilder, WindowMessage},
+        window::{Window, WindowBuilder},
         BuildContext, UiNode, UserInterface,
     },
     resource::texture::{CompressionOptions, Texture},
@@ -68,20 +68,6 @@ pub fn create_file_selector(
     .build(ctx)
 }
 
-pub fn open_file_selector(file_selector: Handle<UiNode>, ui: &UserInterface) {
-    ui.send_message(FileSelectorMessage::root(
-        file_selector,
-        MessageDirection::ToWidget,
-        Some(std::env::current_dir().unwrap()),
-    ));
-
-    ui.send_message(WindowMessage::open_modal(
-        file_selector,
-        MessageDirection::ToWidget,
-        true,
-    ));
-}
-
 pub fn fetch_node_center(handle: Handle<UiNode>, ctx: &BuildContext) -> Vector2<f32> {
     ctx.try_get_node(handle)
         .map(|node| node.center())
@@ -124,4 +110,39 @@ pub fn built_in_skybox() -> SkyBox {
     }
     .build()
     .unwrap()
+}
+
+pub fn make_node_name(name: &str, handle: ErasedHandle) -> String {
+    format!("{} ({}:{})", name, handle.index(), handle.generation())
+}
+
+pub fn apply_visibility_filter<F>(root: Handle<UiNode>, ui: &UserInterface, filter: F)
+where
+    F: Fn(&UiNode) -> Option<bool>,
+{
+    fn apply_filter_recursive<F>(node: Handle<UiNode>, ui: &UserInterface, filter: &F) -> bool
+    where
+        F: Fn(&UiNode) -> Option<bool>,
+    {
+        let node_ref = ui.node(node);
+
+        let mut is_any_match = false;
+        for &child in node_ref.children() {
+            is_any_match |= apply_filter_recursive(child, ui, filter)
+        }
+
+        if let Some(has_match) = filter(node_ref) {
+            is_any_match |= has_match;
+
+            ui.send_message(WidgetMessage::visibility(
+                node,
+                MessageDirection::ToWidget,
+                is_any_match,
+            ));
+        }
+
+        is_any_match
+    }
+
+    apply_filter_recursive(root, ui, &filter);
 }

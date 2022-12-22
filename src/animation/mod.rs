@@ -1,414 +1,218 @@
+//! Animation allows you to change properties of scene nodes at runtime using a set of key frames.
+//! See [`Animation`] docs for more info.
+
 use crate::{
-    asset::ResourceState,
+    animation::track::Track,
     core::{
-        algebra::{UnitQuaternion, Vector3},
         math::wrapf,
         pool::{Handle, Pool, Ticket},
+        reflect::prelude::*,
         visitor::{Visit, VisitResult, Visitor},
     },
-    engine::resource_manager::ResourceManager,
-    resource::model::Model,
-    scene::{graph::Graph, node::Node},
-    utils::log::{Log, MessageKind},
+    scene::{
+        graph::{Graph, NodePool},
+        node::Node,
+    },
+    utils::{self, NameProvider},
 };
-use fxhash::FxHashMap;
 use std::{
     collections::VecDeque,
+    fmt::Debug,
     ops::{Index, IndexMut, Range},
 };
 
+pub use pose::{AnimationPose, NodePose};
+pub use signal::{AnimationEvent, AnimationSignal};
+
+pub mod container;
 pub mod machine;
+pub mod pose;
+pub mod signal;
 pub mod spritesheet;
+pub mod track;
+pub mod value;
 
-#[derive(Copy, Clone, Debug, Visit)]
-pub struct KeyFrame {
-    pub position: Vector3<f32>,
-    pub scale: Vector3<f32>,
-    pub rotation: UnitQuaternion<f32>,
-    pub time: f32,
-}
-
-impl KeyFrame {
-    pub fn new(
-        time: f32,
-        position: Vector3<f32>,
-        scale: Vector3<f32>,
-        rotation: UnitQuaternion<f32>,
-    ) -> Self {
-        Self {
-            position,
-            scale,
-            rotation,
-            time,
-        }
-    }
-}
-
-impl Default for KeyFrame {
-    fn default() -> Self {
-        Self {
-            position: Default::default(),
-            scale: Default::default(),
-            rotation: Default::default(),
-            time: 0.0,
-        }
-    }
-}
-
-#[derive(Default, Copy, Clone, Debug, Visit)]
-pub struct PoseEvaluationFlags {
-    pub ignore_position: bool,
-    pub ignore_rotation: bool,
-    pub ignore_scale: bool,
-}
-
-#[derive(Debug, Visit)]
-pub struct Track {
-    // Frames are not serialized, because it makes no sense to store them in save file,
-    // they will be taken from resource on Resolve stage.
-    #[visit(skip)]
-    frames: Vec<KeyFrame>,
-    enabled: bool,
-    max_time: f32,
-    node: Handle<Node>,
-    flags: PoseEvaluationFlags,
-}
-
-impl Clone for Track {
-    fn clone(&self) -> Self {
-        Self {
-            frames: self.frames.clone(),
-            enabled: self.enabled,
-            max_time: self.max_time,
-            node: self.node,
-            flags: self.flags,
-        }
-    }
-}
-
-impl Default for Track {
-    fn default() -> Self {
-        Self {
-            frames: Vec::new(),
-            enabled: true,
-            max_time: 0.0,
-            node: Default::default(),
-            flags: Default::default(),
-        }
-    }
-}
-
-impl Track {
-    pub fn new() -> Track {
-        Default::default()
-    }
-
-    pub fn set_node(&mut self, node: Handle<Node>) {
-        self.node = node;
-    }
-
-    pub fn get_node(&self) -> Handle<Node> {
-        self.node
-    }
-
-    pub fn add_key_frame(&mut self, key_frame: KeyFrame) {
-        if key_frame.time > self.max_time {
-            self.frames.push(key_frame);
-
-            self.max_time = key_frame.time;
-        } else {
-            // Find a place to insert
-            let mut index = 0;
-            for (i, other_key_frame) in self.frames.iter().enumerate() {
-                if key_frame.time < other_key_frame.time {
-                    index = i;
-                    break;
-                }
-            }
-
-            self.frames.insert(index, key_frame)
-        }
-    }
-
-    pub fn enable(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn set_key_frames(&mut self, key_frames: &[KeyFrame]) {
-        self.frames = key_frames.to_vec();
-        self.max_time = 0.0;
-
-        for key_frame in self.frames.iter() {
-            if key_frame.time > self.max_time {
-                self.max_time = key_frame.time;
-            }
-        }
-    }
-
-    pub fn get_key_frames(&self) -> &[KeyFrame] {
-        &self.frames
-    }
-
-    pub fn get_local_pose(&self, mut time: f32) -> Option<LocalPose> {
-        if self.frames.is_empty() {
-            return None;
-        }
-
-        if time >= self.max_time {
-            return self.frames.last().map(|k| LocalPose {
-                node: self.node,
-                position: k.position,
-                scale: k.scale,
-                rotation: k.rotation,
-            });
-        }
-
-        time = time.clamp(0.0, self.max_time);
-
-        let mut right_index = 0;
-        for (i, keyframe) in self.frames.iter().enumerate() {
-            if keyframe.time >= time {
-                right_index = i;
-                break;
-            }
-        }
-
-        if right_index == 0 {
-            self.frames.first().map(|k| LocalPose {
-                node: self.node,
-                position: k.position,
-                scale: k.scale,
-                rotation: k.rotation,
-            })
-        } else {
-            let left = &self.frames[right_index - 1];
-            let right = &self.frames[right_index];
-            let interpolator = (time - left.time) / (right.time - left.time);
-
-            Some(LocalPose {
-                node: self.node,
-                position: if self.flags.ignore_position {
-                    Vector3::new(0.0, 0.0, 0.0)
-                } else {
-                    left.position.lerp(&right.position, interpolator)
-                },
-                scale: if self.flags.ignore_scale {
-                    Vector3::new(1.0, 1.0, 1.0)
-                } else {
-                    left.scale.lerp(&right.scale, interpolator)
-                },
-                rotation: if self.flags.ignore_rotation {
-                    UnitQuaternion::default()
-                } else {
-                    left.rotation.nlerp(&right.rotation, interpolator)
-                },
-            })
-        }
-    }
-
-    pub fn flags(&self) -> PoseEvaluationFlags {
-        self.flags
-    }
-
-    pub fn set_flags(&mut self, flags: PoseEvaluationFlags) {
-        self.flags = flags;
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct AnimationEvent {
-    pub signal_id: u64,
-}
-
-#[derive(Clone, Debug, Visit)]
-pub struct AnimationSignal {
-    id: u64,
-    time: f32,
-    enabled: bool,
-}
-
-impl AnimationSignal {
-    pub fn new(id: u64, time: f32) -> Self {
-        Self {
-            id,
-            time,
-            enabled: true,
-        }
-    }
-
-    pub fn set_enabled(&mut self, value: bool) {
-        self.enabled = value;
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    pub fn time(&self) -> f32 {
-        self.time
-    }
-}
-
-impl Default for AnimationSignal {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            time: 0.0,
-            enabled: true,
-        }
-    }
-}
-
-#[derive(Debug, Visit)]
+/// # Overview
+///
+/// Animation allows you to change properties of scene nodes at runtime using a set of key frames. Animation
+/// consists of multiple tracks, where each track is bound to a property of a scene node. A track can animate
+/// any numeric properties, starting from numbers (including `bool`) end ending by 2/3/4 dimensional vectors.
+/// Each component (number, x/y/z/w vector components) is stored in a _parametric curve_ (see
+/// [`crate::core::curve::Curve`] docs for more info). Every parametric curve contains zero or more _key frames_.
+/// Graphically this could be represented like so:
+///
+/// ```text
+///                                          Timeline
+///                                             v
+///   Time   > |---------------|------------------------------------>
+///            |               |
+///   Track1 > | node.position |                                     
+///            |   X curve     |..1..........5...........10..........
+///            |   Y curve     |..2.........-2..................1....  < Curve key frames
+///            |   Z curve     |..1..........9......................4
+///            |_______________|  
+///   Track2   | node.property |                                  
+///            | ............  |.....................................
+///            | ............  |.....................................
+///            | ............  |.....................................
+/// ```
+///
+/// Each key frame is just a real number with interpolation mode. Interpolation mode tells the engine how to
+/// calculate intermediate values between key frames. There are three kinds of interpolation used in animations
+/// (you can skip "boring math" if you want):
+///
+/// - **Constant** - intermediate value will be calculated using leftmost value of two. Constant "interpolation" is
+/// usually used to create step-like behaviour, the most common case is to "interpolate" two boolean values.
+/// - **Linear** - intermediate value will be calculated using linear interpolation `i = left + (right - left) / t`,
+/// where `t = (time_position - left) / (right - left)`. `t` is always in `0..1` range. Linear interpolation is usually
+/// used to create "straight" transitions between two values.
+/// - **Cubic** - intermediate value will be calculated using Hermite cubic spline:
+/// `i = (2t^3 - 3t^2 + 1) * left + (t^3 - 2t^2 + t) * left_tangent + (-2t^3 + 3t^2) * right + (t^3 - t^2) * right_tangent`,
+/// where `t = (time_position - left) / (right - left)` (`t` is always in `0..1` range), `left_tangent` and `right_tangent`
+/// is usually a `tan(angle)`. Cubic interpolation is usually used to create "smooth" transitions between two values.
+///
+/// # Track binding
+///
+/// Each track is always bound to a property in a node, either by its name or by a special binding. The name is used to fetch the
+/// property using reflection, the special binding is a faster way of fetching built-in properties. It is usually used to animate
+/// position, scale and rotation (these are the most common properties available in every scene node).
+///
+/// # Time slice and looping
+///
+/// While key frames on the curves can be located at arbitrary position in time, animations usually plays a specific time slice.
+/// By default, each animation will play on a given time slice infinitely - it is called _animation looping_, it works in both
+/// playback directions.
+///
+/// # Speed
+///
+/// You can vary playback speed in wide range, by default every animation has playback speed multiplier set to 1.0. The multiplier
+/// tells how faster (>1) or slower (<1) the animation needs to be played. Negative speed multiplier values will reverse playback.
+///
+/// # Enabling or disabling animations
+///
+/// Sometimes there's a need to disable/enable an animation or check if it is enabled or not, you can do this by using the pair
+/// of respective methods - [`Animation::set_enabled`] and [`Animation::is_enabled`].
+///
+/// # Signals
+///
+/// Signal is a named marker on specific time position on the animation timeline. Signal will emit an event if the animation playback
+/// time passes signal's position from left-to-right (or vice versa depending on playback direction). Signals are usually used to
+/// attach some specific actions to a position in time. For example, you can have a walking animation and you want to emit sounds
+/// when character's feet touch ground. In this case you need to add a few signals at times when each foot touches the ground.
+/// After that all you need to do is to fetch animation events one-by-one and emit respective sounds. See [`AnimationSignal`] docs
+/// for more info and examples.
+///
+/// # Examples
+///
+/// Usually, animations are created from the editor or some external tool and then imported in the engine. Before trying the example
+/// below, please read the docs for [`crate::scene::animation::AnimationPlayer`] node, it is much more convenient way of animating
+/// other nodes. The node can be created from the editor and you don't even need to write any code.
+///
+/// Use the following example code as a guide **only** if you need to create procedural animations:
+///
+/// ```rust
+/// use fyrox::{
+///     animation::{
+///         container::{TrackFramesContainer, TrackValueKind},
+///         track::Track,
+///         value::ValueBinding,
+///         Animation,
+///     },
+///     core::{
+///         curve::{Curve, CurveKey, CurveKeyKind},
+///         pool::Handle,
+///     },
+///     scene::{
+///         node::Node,
+///         base::BaseBuilder,
+///         graph::Graph,
+///         pivot::PivotBuilder
+///     }
+/// };
+///
+/// fn create_animation(node: Handle<Node>) -> Animation {
+///     let mut frames_container = TrackFramesContainer::new(TrackValueKind::Vector3);
+///
+///     // We'll animate only X coordinate.
+///     let x_curve = Curve::from(vec![
+///         CurveKey::new(0.5, 2.0, CurveKeyKind::Linear),
+///         CurveKey::new(0.75, 1.0, CurveKeyKind::Linear),
+///         CurveKey::new(1.0, 3.0, CurveKeyKind::Linear),
+///     ]);
+///
+///     // Three curves because position is X, Y, Z vector;
+///     frames_container.add_curve(x_curve);
+///     frames_container.add_curve(Curve::default());
+///     frames_container.add_curve(Curve::default());
+///
+///     // Create a track that will animated the node using the curve above.
+///     let mut track = Track::new(frames_container, ValueBinding::Position);
+///     track.set_target(node);
+///
+///     // Finally create an animation and set its time slice and turn it on.
+///     let mut animation = Animation::default();
+///     animation.add_track(track);
+///     animation.set_time_slice(0.0..1.0);
+///     animation.set_enabled(true);
+///
+///     animation
+/// }
+///
+/// // Create a graph with a node.
+/// let mut graph = Graph::new();
+/// let some_node = PivotBuilder::new(BaseBuilder::new()).build(&mut graph);
+///
+/// // Create the animation.
+/// let mut animation = create_animation(some_node);
+///
+/// // Emulate some ticks (like it was updated from the main loop of your game).
+/// for _ in 0..10 {
+///     animation.tick(1.0 / 60.0);
+///     animation.pose().apply(&mut graph);
+/// }
+/// ```
+///
+/// The code above creates a simple animation that moves a node along X axis in various ways. The usage of the animation
+/// is only for the sake of completeness of the example. In the real games you need to add the animation to an animation
+/// player scene node and it will do the job for you.
+#[derive(Debug, Reflect, Visit, PartialEq)]
 pub struct Animation {
-    // TODO: Extract into separate struct AnimationTimeline
+    #[visit(optional)]
+    name: String,
     tracks: Vec<Track>,
-    length: f32,
     time_position: f32,
-    #[visit(optional)] // Backward compatibility
-    time_slice: Option<Range<f32>>,
-    ///////////////////////////////////////////////////////
+    #[visit(optional)]
+    time_slice: Range<f32>,
     speed: f32,
     looped: bool,
     enabled: bool,
-    pub(crate) resource: Option<Model>,
+    signals: Vec<AnimationSignal>,
+
+    // Non-serialized
+    #[reflect(hidden)]
     #[visit(skip)]
     pose: AnimationPose,
-    signals: Vec<AnimationSignal>,
+    // Non-serialized
+    #[reflect(hidden)]
     #[visit(skip)]
     events: VecDeque<AnimationEvent>,
 }
 
-/// Snapshot of scene node local transform state.
-#[derive(Clone, Debug)]
-pub struct LocalPose {
-    node: Handle<Node>,
-    position: Vector3<f32>,
-    scale: Vector3<f32>,
-    rotation: UnitQuaternion<f32>,
-}
-
-impl Default for LocalPose {
-    fn default() -> Self {
-        Self {
-            node: Handle::NONE,
-            position: Vector3::default(),
-            scale: Vector3::new(1.0, 1.0, 1.0),
-            rotation: UnitQuaternion::identity(),
-        }
-    }
-}
-
-impl LocalPose {
-    fn weighted_clone(&self, weight: f32) -> Self {
-        Self {
-            node: self.node,
-            position: self.position.scale(weight),
-            rotation: self.rotation.nlerp(&self.rotation, weight),
-            scale: self.scale.scale(weight),
-        }
-    }
-
-    pub fn blend_with(&mut self, other: &LocalPose, weight: f32) {
-        self.position += other.position.scale(weight);
-        self.rotation = self.rotation.nlerp(&other.rotation, weight);
-        self.scale += other.scale.scale(weight);
-    }
-
-    pub fn position(&self) -> Vector3<f32> {
-        self.position
-    }
-
-    pub fn scale(&self) -> Vector3<f32> {
-        self.scale
-    }
-
-    pub fn rotation(&self) -> UnitQuaternion<f32> {
-        self.rotation
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct AnimationPose {
-    local_poses: FxHashMap<Handle<Node>, LocalPose>,
-}
-
-impl AnimationPose {
-    pub fn clone_into(&self, dest: &mut AnimationPose) {
-        dest.reset();
-        for (handle, local_pose) in self.local_poses.iter() {
-            dest.local_poses.insert(*handle, local_pose.clone());
-        }
-    }
-
-    pub fn blend_with(&mut self, other: &AnimationPose, weight: f32) {
-        for (handle, other_pose) in other.local_poses.iter() {
-            if let Some(current_pose) = self.local_poses.get_mut(handle) {
-                current_pose.blend_with(other_pose, weight);
-            } else {
-                // There are no corresponding local pose, do fake blend between identity
-                // pose and other.
-                self.add_local_pose(other_pose.weighted_clone(weight));
-            }
-        }
-    }
-
-    fn add_local_pose(&mut self, local_pose: LocalPose) {
-        self.local_poses.insert(local_pose.node, local_pose);
-    }
-
-    pub fn reset(&mut self) {
-        self.local_poses.clear();
-    }
-
-    pub fn apply(&self, graph: &mut Graph) {
-        for (node, local_pose) in self.local_poses.iter() {
-            if node.is_none() {
-                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
-            } else {
-                graph[*node]
-                    .local_transform_mut()
-                    .set_position(local_pose.position)
-                    .set_rotation(local_pose.rotation)
-                    .set_scale(local_pose.scale);
-            }
-        }
-    }
-
-    /// Calls given callback function for each node and allows you to apply pose with your own
-    /// rules. This could be useful if you need to ignore transform some part of pose for a node.
-    pub fn apply_with<C>(&self, graph: &mut Graph, mut callback: C)
-    where
-        C: FnMut(&mut Node, Handle<Node>, &LocalPose),
-    {
-        for (node, local_pose) in self.local_poses.iter() {
-            if node.is_none() {
-                Log::writeln(MessageKind::Error, "Invalid node handle found for animation pose, most likely it means that animation retargeting failed!");
-            } else {
-                callback(&mut graph[*node], *node, local_pose);
-            }
-        }
+impl NameProvider for Animation {
+    fn name(&self) -> &str {
+        &self.name
     }
 }
 
 impl Clone for Animation {
     fn clone(&self) -> Self {
         Self {
+            name: self.name.clone(),
             tracks: self.tracks.clone(),
             speed: self.speed,
-            length: self.length,
             time_position: self.time_position,
             looped: self.looped,
             enabled: self.enabled,
-            resource: self.resource.clone(),
             pose: Default::default(),
             signals: self.signals.clone(),
             events: Default::default(),
@@ -418,39 +222,79 @@ impl Clone for Animation {
 }
 
 impl Animation {
+    /// Sets a new name for the animation. The name then could be used to find the animation in a container.
+    pub fn set_name<S: AsRef<str>>(&mut self, name: S) {
+        self.name = name.as_ref().to_owned();
+    }
+
+    /// Returns current name of the animation.
+    pub fn name(&self) -> &str {
+        self.name.as_ref()
+    }
+
+    /// Adds new track to the animation. Animation can have unlimited number of tracks, each track is responsible
+    /// for animation of a single scene node.
     pub fn add_track(&mut self, track: Track) {
         self.tracks.push(track);
+    }
 
+    /// Removes a track at given index.
+    pub fn remove_track(&mut self, index: usize) -> Track {
+        self.tracks.remove(index)
+    }
+
+    /// Inserts a track at given index.
+    pub fn insert_track(&mut self, index: usize, track: Track) {
+        self.tracks.insert(index, track)
+    }
+
+    /// Removes last track from the list of tracks of the animation.
+    pub fn pop_track(&mut self) -> Option<Track> {
+        self.tracks.pop()
+    }
+
+    /// Calculates new length of the animation based on the content of its tracks. It looks for the most "right"
+    /// curve key in all curves of all tracks and treats it as length of the animation. The method could be used
+    /// in case if you formed animation from code using just curves and don't know the actual length of the
+    /// animation.  
+    pub fn fit_length_to_content(&mut self) {
+        self.time_slice.start = 0.0;
         for track in self.tracks.iter_mut() {
-            if track.max_time > self.length {
-                self.length = track.max_time;
+            if track.time_length() > self.time_slice.end {
+                self.time_slice.end = track.time_length();
             }
         }
     }
 
-    pub fn get_tracks(&self) -> &[Track] {
+    /// Returns a reference to tracks container.
+    pub fn tracks(&self) -> &[Track] {
         &self.tracks
     }
 
+    /// Sets new time position of the animation. The actual time position the animation will have after the call,
+    /// can be different in two reasons:
+    ///
+    /// - If the animation is looping and the new time position is outside of the time slice of the animation, then
+    /// the actual time position will be wrapped to fit the time slice. For example, if you have an animation that has
+    /// `0.0..5.0s` time slice and you trying to set `7.5s` position, the actual time position will be `2.5s` (it
+    /// wraps the input value on the given time slice).
+    /// - If the animation is **not** looping and the new time position is outside of the time slice of the animation,
+    /// then the actual time position will be clamped to the time clice of the animation.
     pub fn set_time_position(&mut self, time: f32) -> &mut Self {
-        let time_slice = self.time_slice.clone().unwrap_or(Range {
-            start: 0.0,
-            end: self.length,
-        });
-
         if self.looped {
-            self.time_position = wrapf(time, time_slice.start, time_slice.end);
+            self.time_position = wrapf(time, self.time_slice.start, self.time_slice.end);
         } else {
-            self.time_position = time.clamp(time_slice.start, time_slice.end);
+            self.time_position = time.clamp(self.time_slice.start, self.time_slice.end);
         }
 
         self
     }
 
-    pub fn set_time_slice(&mut self, time_slice: Option<Range<f32>>) {
-        if let Some(time_slice) = time_slice.clone() {
-            assert!(time_slice.start <= time_slice.end);
-        }
+    /// Sets new time slice of the animation in seconds. It defines a time interval in which the animation will
+    /// be played. Current playback position will be clamped (or wrapped if the animation is looping) to fit to new
+    /// bounds.
+    pub fn set_time_slice(&mut self, time_slice: Range<f32>) {
+        assert!(time_slice.start <= time_slice.end);
 
         self.time_slice = time_slice;
 
@@ -458,19 +302,28 @@ impl Animation {
         self.set_time_position(self.time_position);
     }
 
+    /// Returns current time slice of the animation.
+    pub fn time_slice(&self) -> Range<f32> {
+        self.time_slice.clone()
+    }
+
+    /// Rewinds the animation to the beginning.
     pub fn rewind(&mut self) -> &mut Self {
-        self.set_time_position(0.0)
+        self.set_time_position(self.time_slice.start)
     }
 
+    /// Returns length of the animation in seconds.
     pub fn length(&self) -> f32 {
-        self.length
+        self.time_slice.end - self.time_slice.start
     }
 
-    fn tick(&mut self, dt: f32) {
+    /// Performs a single update tick and calculates an output pose. This method is low level, you should not use it
+    /// in normal circumstances - the engine will call it for you.
+    pub fn tick(&mut self, dt: f32) {
         self.update_pose();
 
-        let current_time_position = self.get_time_position();
-        let new_time_position = current_time_position + dt * self.get_speed();
+        let current_time_position = self.time_position();
+        let new_time_position = current_time_position + dt * self.speed();
 
         for signal in self.signals.iter_mut().filter(|s| s.enabled) {
             if self.speed >= 0.0
@@ -490,57 +343,113 @@ impl Animation {
         self.set_time_position(new_time_position);
     }
 
+    /// Extracts a first event from the events queue of the animation.
     pub fn pop_event(&mut self) -> Option<AnimationEvent> {
         self.events.pop_front()
     }
 
-    pub fn get_time_position(&self) -> f32 {
+    /// Returns a reference to inner events queue. It is useful when you need to iterate over the events, but
+    /// don't extract them from the queue.
+    pub fn events_ref(&self) -> &VecDeque<AnimationEvent> {
+        &self.events
+    }
+
+    /// Return a mutable reference to inner events queue. Provides you a full controls over animation events,
+    /// you can even manually inject events in the queue.
+    pub fn events_mut(&mut self) -> &mut VecDeque<AnimationEvent> {
+        &mut self.events
+    }
+
+    /// Clones the events queue and returns it to the caller.
+    pub fn events(&self) -> VecDeque<AnimationEvent> {
+        self.events.clone()
+    }
+
+    /// Returns current time position of the animation. The time position is guaranteed to be in the range of
+    /// current time slice of the animation.
+    pub fn time_position(&self) -> f32 {
         self.time_position
     }
 
-    pub fn get_speed(&self) -> f32 {
-        self.speed
-    }
-
-    pub fn set_loop(&mut self, state: bool) -> &mut Self {
-        self.looped = state;
-        self
-    }
-
-    pub fn is_loop(&self) -> bool {
-        self.looped
-    }
-
-    pub fn has_ended(&self) -> bool {
-        !self.looped && (self.time_position - self.length).abs() <= f32::EPSILON
-    }
-
-    pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
-        self.enabled = enabled;
-        self
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
+    /// Sets new speed multiplier for the animation. By default it is set to 1.0. Negative values can be used
+    /// to play the animation in reverse.
     pub fn set_speed(&mut self, speed: f32) -> &mut Self {
         self.speed = speed;
         self
     }
 
-    pub fn get_tracks_mut(&mut self) -> &mut [Track] {
+    /// Returns speed multiplier of the animation.
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// Enables or disables looping of the animation.
+    pub fn set_loop(&mut self, state: bool) -> &mut Self {
+        self.looped = state;
+        self
+    }
+
+    /// Returns `true` if the animation is looping, `false` - otherwise.
+    pub fn is_loop(&self) -> bool {
+        self.looped
+    }
+
+    /// Returns `true` if the animation was played until the end of current time slice of the animation, `false` -
+    /// otherwise. Looping animations will always return `false`.
+    pub fn has_ended(&self) -> bool {
+        !self.looped && (self.time_position - self.time_slice.end).abs() <= f32::EPSILON
+    }
+
+    /// Enables or disables the animation, disabled animations does not updated and their output pose will remain
+    /// the same. By default every animation is enabled.
+    pub fn set_enabled(&mut self, enabled: bool) -> &mut Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Returns `true` if the animation is enabled, `false` - otherwise.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns a mutable reference to the track container.
+    pub fn tracks_mut(&mut self) -> &mut [Track] {
         &mut self.tracks
     }
 
-    pub fn get_resource(&self) -> Option<Model> {
-        self.resource.clone()
+    /// Adds a new animation signal to the animation. See [`AnimationSignal`] docs for more info and examples.
+    pub fn add_signal(&mut self, signal: AnimationSignal) -> &mut Self {
+        self.signals.push(signal);
+        self
     }
 
+    /// Removes last animation signal from the container of the animation.
+    pub fn pop_signal(&mut self) -> Option<AnimationSignal> {
+        self.signals.pop()
+    }
+
+    /// Inserts a new animation signal at given position.
+    pub fn insert_signal(&mut self, index: usize, signal: AnimationSignal) {
+        self.signals.insert(index, signal)
+    }
+
+    /// Removes an animation signal at given index.
+    pub fn remove_signal(&mut self, index: usize) -> AnimationSignal {
+        self.signals.remove(index)
+    }
+
+    /// Returns a reference to the animation signals container.
     pub fn signals(&self) -> &[AnimationSignal] {
         &self.signals
     }
 
+    /// Returns a mutable reference to the inner animation signals container, allowing you to modify the signals.
+    pub fn signals_mut(&mut self) -> &mut [AnimationSignal] {
+        &mut self.signals
+    }
+
+    /// Removes all tracks from the animation for which the given `filter` closure returns `false`. Could be useful
+    /// to remove undesired animation tracks.
     pub fn retain_tracks<F>(&mut self, filter: F)
     where
         F: FnMut(&Track) -> bool,
@@ -548,15 +457,9 @@ impl Animation {
         self.tracks.retain(filter)
     }
 
-    pub fn add_signal(&mut self, signal: AnimationSignal) -> &mut Self {
-        self.signals.push(signal);
-        self
-    }
-
-    /// Enables or disables animation tracks for nodes in hierarchy starting from given root.
-    /// Could be useful to enable or disable animation for skeleton parts, i.e. you don't want
-    /// legs to be animated and you know that legs starts from torso bone, then you could do
-    /// this.
+    /// Enables or disables animation tracks for nodes in hierarchy starting from given root. Could be useful to enable
+    /// or disable animation for skeleton parts, i.e. you don't want legs to be animated and you know that legs starts
+    /// from torso bone, then you could do this.
     ///
     /// ```
     /// use fyrox::scene::node::Node;
@@ -569,15 +472,14 @@ impl Animation {
     /// }
     /// ```
     ///
-    /// After this legs won't be animated and animation could be blended together with run
-    /// animation so it will produce new animation - run and aim.
+    /// After this legs won't be animated and animation could be blended together with run animation so it will produce
+    /// new animation - run and aim.
     pub fn set_tracks_enabled_from(&mut self, handle: Handle<Node>, enabled: bool, graph: &Graph) {
         let mut stack = vec![handle];
         while let Some(node) = stack.pop() {
             for track in self.tracks.iter_mut() {
-                if track.node == node {
-                    track.enabled = enabled;
-                    break;
+                if track.target() == node {
+                    track.enable(enabled);
                 }
             }
             for child in graph[node].children() {
@@ -586,107 +488,65 @@ impl Animation {
         }
     }
 
+    /// Tries to find all tracks that refer to a given node and enables or disables them.
     pub fn set_node_track_enabled(&mut self, handle: Handle<Node>, enabled: bool) {
         for track in self.tracks.iter_mut() {
-            if track.node == handle {
-                track.enabled = enabled;
+            if track.target() == handle {
+                track.enable(enabled);
             }
         }
     }
 
-    pub fn track_of(&self, handle: Handle<Node>) -> Option<&Track> {
-        self.tracks.iter().find(|&track| track.node == handle)
+    /// Returns an iterator that yields a number of references to tracks that refer to a given node.
+    pub fn tracks_of(&self, handle: Handle<Node>) -> impl Iterator<Item = &Track> {
+        self.tracks
+            .iter()
+            .filter(move |track| track.target() == handle)
     }
 
-    pub fn track_of_mut(&mut self, handle: Handle<Node>) -> Option<&mut Track> {
-        self.tracks.iter_mut().find(|track| track.node == handle)
+    /// Returns an iterator that yields a number of references to tracks that refer to a given node.
+    pub fn tracks_of_mut(&mut self, handle: Handle<Node>) -> impl Iterator<Item = &mut Track> {
+        self.tracks
+            .iter_mut()
+            .filter(move |track| track.target() == handle)
     }
 
-    pub(crate) fn restore_resources(&mut self, resource_manager: ResourceManager) {
-        if let Some(resource) = self.resource.as_mut() {
-            let new_resource = resource_manager.request_model(resource.state().path());
-            *resource = new_resource;
-        }
+    /// Tries to find a layer by its name. Returns index of the signal and its reference.
+    #[inline]
+    pub fn find_signal_by_name_ref<S: AsRef<str>>(
+        &self,
+        name: S,
+    ) -> Option<(usize, &AnimationSignal)> {
+        utils::find_by_name_ref(self.signals.iter().enumerate(), name)
     }
 
-    pub(crate) fn resolve(&mut self, graph: &Graph) {
-        // Copy key frames from resource for each animation. This is needed because we
-        // do not store key frames in save file, but just keep reference to resource
-        // from which key frames should be taken on load.
-        if let Some(resource) = self.resource.clone() {
-            let resource = resource.state();
-            match *resource {
-                ResourceState::Ok(ref data) => {
-                    // TODO: Here we assume that resource contains only *one* animation.
-                    if let Some(ref_animation) = data.get_scene().animations.pool.at(0) {
-                        for track in self.get_tracks_mut() {
-                            // This may panic if animation has track that refers to a deleted node,
-                            // it can happen if you deleted a node but forgot to remove animation
-                            // that uses this node.
-                            let track_node = &graph[track.get_node()];
+    /// Tries to find a signal by its name. Returns index of the signal and its reference.
+    #[inline]
+    pub fn find_by_name_mut<S: AsRef<str>>(
+        &mut self,
+        name: S,
+    ) -> Option<(usize, &mut AnimationSignal)> {
+        utils::find_by_name_mut(self.signals.iter_mut().enumerate(), name)
+    }
 
-                            // Find corresponding track in resource using names of nodes, not
-                            // original handles of instantiated nodes. We can't use original
-                            // handles here because animation can be targeted to a node that
-                            // wasn't instantiated from animation resource. It can be instantiated
-                            // from some other resource. For example you have a character with
-                            // multiple animations. Character "lives" in its own file without animations
-                            // but with skin. Each animation "lives" in its own file too, then
-                            // you did animation retargeting from animation resource to your character
-                            // instantiated model, which is essentially copies key frames to new
-                            // animation targeted to character instance.
-                            let mut found = false;
-                            for ref_track in ref_animation.get_tracks().iter() {
-                                if track_node.name()
-                                    == data.get_scene().graph[ref_track.get_node()].name()
-                                {
-                                    track.set_key_frames(ref_track.get_key_frames());
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                Log::write(
-                                    MessageKind::Error,
-                                    format!(
-                                        "Failed to copy key frames for node {}!",
-                                        track_node.name()
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-                ResourceState::LoadError {
-                    ref path,
-                    ref error,
-                } => Log::err(format!(
-                    "Unable to restore animation key frames from {} resource. Reason: {:?}",
-                    path.display(),
-                    error
-                )),
-                ResourceState::Pending { ref path, .. } => {
-                    panic!(
-                        "Animation resource {} must be fully loaded before resolving!",
-                        path.display()
-                    )
-                }
-            }
-        }
+    /// Removes all tracks from the animation.
+    pub fn remove_tracks(&mut self) {
+        self.tracks.clear();
     }
 
     fn update_pose(&mut self) {
         self.pose.reset();
         for track in self.tracks.iter() {
             if track.is_enabled() {
-                if let Some(local_pose) = track.get_local_pose(self.time_position) {
-                    self.pose.add_local_pose(local_pose);
+                if let Some(bound_value) = track.fetch(self.time_position) {
+                    self.pose.add_to_node_pose(track.target(), bound_value);
                 }
             }
         }
     }
 
-    pub fn get_pose(&self) -> &AnimationPose {
+    /// Returns current pose of the animation (a final result that can be applied to a scene graph).
+    pub fn pose(&self) -> &AnimationPose {
         &self.pose
     }
 }
@@ -694,13 +554,12 @@ impl Animation {
 impl Default for Animation {
     fn default() -> Self {
         Self {
+            name: Default::default(),
             tracks: Vec::new(),
             speed: 1.0,
-            length: 0.0,
             time_position: 0.0,
             enabled: true,
             looped: true,
-            resource: Default::default(),
             pose: Default::default(),
             signals: Default::default(),
             events: Default::default(),
@@ -709,7 +568,9 @@ impl Default for Animation {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A container for animations. It is a tiny wrapper around [`Pool`], you should never create the container yourself,
+/// it is managed by the engine.
+#[derive(Debug, Clone, Reflect, PartialEq)]
 pub struct AnimationContainer {
     pool: Pool<Animation>,
 }
@@ -725,36 +586,43 @@ impl AnimationContainer {
         Self { pool: Pool::new() }
     }
 
+    /// Returns a total amount of animations in the container.
     #[inline]
     pub fn alive_count(&self) -> u32 {
         self.pool.alive_count()
     }
 
+    /// Returns an iterator yielding a references to animations in the container.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &Animation> {
         self.pool.iter()
     }
 
+    /// Returns an iterator yielding a pair (handle, reference) to animations in the container.
     #[inline]
     pub fn pair_iter(&self) -> impl Iterator<Item = (Handle<Animation>, &Animation)> {
         self.pool.pair_iter()
     }
 
+    /// Returns an iterator yielding a pair (handle, reference) to animations in the container.
     #[inline]
     pub fn pair_iter_mut(&mut self) -> impl Iterator<Item = (Handle<Animation>, &mut Animation)> {
         self.pool.pair_iter_mut()
     }
 
+    /// Returns an iterator yielding a references to animations in the container.
     #[inline]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Animation> {
         self.pool.iter_mut()
     }
 
+    /// Adds a new animation to the container and returns its handle.
     #[inline]
     pub fn add(&mut self, animation: Animation) -> Handle<Animation> {
         self.pool.spawn(animation)
     }
 
+    /// Tries to remove an animation from the container by its handle.
     #[inline]
     pub fn remove(&mut self, handle: Handle<Animation>) -> Option<Animation> {
         self.pool.try_free(handle)
@@ -780,31 +648,56 @@ impl AnimationContainer {
         self.pool.forget_ticket(ticket)
     }
 
+    /// Removes all animations.
     #[inline]
     pub fn clear(&mut self) {
         self.pool.clear()
     }
 
+    /// Tries to borrow a reference to an animation in the container. Panics if the handle is invalid.
     #[inline]
     pub fn get(&self, handle: Handle<Animation>) -> &Animation {
         self.pool.borrow(handle)
     }
 
+    /// Tries to borrow a mutable reference to an animation in the container. Panics if the handle is invalid.
     #[inline]
     pub fn get_mut(&mut self, handle: Handle<Animation>) -> &mut Animation {
         self.pool.borrow_mut(handle)
     }
 
+    /// Tries to borrow a reference to an animation in the container.
     #[inline]
     pub fn try_get(&self, handle: Handle<Animation>) -> Option<&Animation> {
         self.pool.try_borrow(handle)
     }
 
+    /// Tries to borrow a mutable reference to an animation in the container.
     #[inline]
     pub fn try_get_mut(&mut self, handle: Handle<Animation>) -> Option<&mut Animation> {
         self.pool.try_borrow_mut(handle)
     }
 
+    /// Tries to find an animation by its name in the container.
+    #[inline]
+    pub fn find_by_name_ref<S: AsRef<str>>(
+        &self,
+        name: S,
+    ) -> Option<(Handle<Animation>, &Animation)> {
+        utils::find_by_name_ref(self.pool.pair_iter(), name)
+    }
+
+    /// Tries to find an animation by its name in the container.
+    #[inline]
+    pub fn find_by_name_mut<S: AsRef<str>>(
+        &mut self,
+        name: S,
+    ) -> Option<(Handle<Animation>, &mut Animation)> {
+        utils::find_by_name_mut(self.pool.pair_iter_mut(), name)
+    }
+
+    /// Removes every animation from the container that does not satisfy a particular condition represented by the given
+    /// closue.
     #[inline]
     pub fn retain<P>(&mut self, pred: P)
     where
@@ -813,20 +706,14 @@ impl AnimationContainer {
         self.pool.retain(pred)
     }
 
-    pub fn resolve(&mut self, graph: &Graph) {
-        Log::writeln(MessageKind::Information, "Resolving animations...");
-        for animation in self.pool.iter_mut() {
-            animation.resolve(graph)
-        }
-        Log::writeln(
-            MessageKind::Information,
-            "Animations resolved successfully!",
-        );
-    }
-
-    pub fn update_animations(&mut self, dt: f32) {
+    /// Updates all animations in the container and applies their poses to respective nodes. This method is intended to
+    /// be used only by the internals of the engine!
+    pub fn update_animations(&mut self, nodes: &mut NodePool, apply: bool, dt: f32) {
         for animation in self.pool.iter_mut().filter(|anim| anim.enabled) {
             animation.tick(dt);
+            if apply {
+                animation.pose.apply_internal(nodes);
+            }
         }
     }
 
@@ -834,11 +721,10 @@ impl AnimationContainer {
     ///
     /// # Potential use cases
     ///
-    /// Sometimes there is a need to use animation events only from one frame,
-    /// in this case you should clear events each frame. This situation might come up
-    /// when you have multiple animations with signals, but at each frame not every
-    /// event gets processed. This might result in unwanted side effects, like multiple
-    /// attack events may result in huge damage in a single frame.
+    /// Sometimes there is a need to use animation events only from one frame, in this case you should clear events each frame.
+    /// This situation might come up when you have multiple animations with signals, but at each frame not every event gets
+    /// processed. This might result in unwanted side effects, like multiple attack events may result in huge damage in a single
+    /// frame.
     pub fn clear_animation_events(&mut self) {
         for animation in self.pool.iter_mut() {
             animation.events.clear();

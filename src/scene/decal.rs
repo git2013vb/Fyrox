@@ -5,10 +5,9 @@
 use crate::{
     core::{
         color::Color,
-        inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -83,7 +82,7 @@ use std::ops::{Deref, DerefMut};
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Visit, Default, Clone, Inspect, Reflect)]
+#[derive(Debug, Visit, Default, Clone, Reflect)]
 pub struct Decal {
     base: Base,
 
@@ -96,7 +95,7 @@ pub struct Decal {
     #[reflect(setter = "set_color")]
     color: InheritableVariable<Color>,
 
-    #[inspect(min_value = 0.0)]
+    #[reflect(min_value = 0.0)]
     #[reflect(setter = "set_layer")]
     layer: InheritableVariable<u8>,
 }
@@ -124,7 +123,10 @@ impl TypeUuidProvider for Decal {
 impl Decal {
     /// Sets new diffuse texture.
     pub fn set_diffuse_texture(&mut self, diffuse_texture: Option<Texture>) -> Option<Texture> {
-        std::mem::replace(self.diffuse_texture.get_mut(), diffuse_texture)
+        std::mem::replace(
+            self.diffuse_texture.get_value_mut_and_mark_modified(),
+            diffuse_texture,
+        )
     }
 
     /// Returns current diffuse texture.
@@ -139,7 +141,10 @@ impl Decal {
 
     /// Sets new normal texture.
     pub fn set_normal_texture(&mut self, normal_texture: Option<Texture>) -> Option<Texture> {
-        std::mem::replace(self.normal_texture.get_mut(), normal_texture)
+        std::mem::replace(
+            self.normal_texture.get_value_mut_and_mark_modified(),
+            normal_texture,
+        )
     }
 
     /// Returns current normal texture.
@@ -154,7 +159,7 @@ impl Decal {
 
     /// Sets new color for the decal.
     pub fn set_color(&mut self, color: Color) -> Color {
-        self.color.set(color)
+        self.color.set_value_and_mark_modified(color)
     }
 
     /// Returns current color of the decal.
@@ -168,7 +173,7 @@ impl Decal {
     /// example blood splatter decal will have `index == 0` in this case. In case of dynamic
     /// objects (like bots, etc.) index will be 1.
     pub fn set_layer(&mut self, layer: u8) -> u8 {
-        self.layer.set(layer)
+        self.layer.set_value_and_mark_modified(layer)
     }
 
     /// Returns current layer index.

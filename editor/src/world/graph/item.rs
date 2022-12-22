@@ -1,3 +1,5 @@
+use crate::load_image;
+use crate::utils::make_node_name;
 use fyrox::{
     core::{algebra::Vector2, pool::Handle},
     gui::{
@@ -9,13 +11,14 @@ use fyrox::{
         message::{MessageDirection, OsEvent, UiMessage},
         text::{TextBuilder, TextMessage},
         tree::{Tree, TreeBuilder},
-        widget::{Widget, WidgetBuilder},
+        utils::make_simple_tooltip,
+        widget::{Widget, WidgetBuilder, WidgetMessage},
         BuildContext, Control, NodeHandleMapping, Thickness, UiNode, UserInterface,
         VerticalAlignment,
     },
 };
-use std::any::{Any, TypeId};
 use std::{
+    any::{Any, TypeId},
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
     sync::mpsc::Sender,
@@ -24,17 +27,22 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SceneItemMessage {
     Name(String),
+    Validate(Result<(), String>),
 }
 
 impl SceneItemMessage {
     define_constructor!(SceneItemMessage:Name => fn name(String), layout: false);
+    define_constructor!(SceneItemMessage:Validate => fn validate(Result<(), String>), layout: false);
 }
 
 pub struct SceneItem<T> {
     pub tree: Tree,
     text_name: Handle<UiNode>,
     name_value: String,
+    grid: Handle<UiNode>,
     pub entity_handle: Handle<T>,
+    // Can be unassigned if there's no warning.
+    pub warning_icon: Handle<UiNode>,
 }
 
 impl<T> SceneItem<T> {
@@ -49,7 +57,9 @@ impl<T> Clone for SceneItem<T> {
             tree: self.tree.clone(),
             text_name: self.text_name,
             name_value: self.name_value.clone(),
+            grid: self.grid,
             entity_handle: self.entity_handle,
+            warning_icon: self.warning_icon,
         }
     }
 }
@@ -109,20 +119,47 @@ impl<T: 'static> Control for SceneItem<T> {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.tree.handle_routed_message(ui, message);
 
-        if let Some(SceneItemMessage::Name(name)) = message.data::<SceneItemMessage>() {
+        if let Some(SceneItemMessage::Name(name)) = message.data() {
             if message.destination() == self.handle() {
-                self.name_value = format!(
-                    "{} ({}:{})",
-                    name,
-                    self.entity_handle.index(),
-                    self.entity_handle.generation()
-                );
+                self.name_value = make_node_name(name, self.entity_handle.into());
 
                 ui.send_message(TextMessage::text(
                     self.text_name,
                     MessageDirection::ToWidget,
                     self.name_value.clone(),
                 ));
+            }
+        } else if let Some(SceneItemMessage::Validate(result)) = message.data() {
+            if message.destination() == self.handle() {
+                match result {
+                    Ok(_) => {
+                        ui.send_message(WidgetMessage::remove(
+                            self.warning_icon,
+                            MessageDirection::ToWidget,
+                        ));
+                    }
+                    Err(msg) => {
+                        let warning_icon = ImageBuilder::new(
+                            WidgetBuilder::new()
+                                .with_width(20.0)
+                                .with_height(20.0)
+                                .with_tooltip(make_simple_tooltip(&mut ui.build_ctx(), msg))
+                                .with_margin(Thickness::uniform(1.0))
+                                .on_row(0)
+                                .on_column(2),
+                        )
+                        .with_opt_texture(load_image(include_bytes!(
+                            "../../../resources/embed/warning.png"
+                        )))
+                        .build(&mut ui.build_ctx());
+
+                        ui.send_message(WidgetMessage::link(
+                            warning_icon,
+                            MessageDirection::ToWidget,
+                            self.grid,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -219,6 +256,7 @@ impl<T: 'static> SceneItemBuilder<T> {
         .add_row(Row::stretch())
         .add_column(Column::auto())
         .add_column(Column::stretch())
+        .add_column(Column::auto())
         .build(ctx);
 
         let tree = self.tree_builder.with_content(content).build_tree(ctx);
@@ -228,6 +266,8 @@ impl<T: 'static> SceneItemBuilder<T> {
             entity_handle: self.entity_handle,
             name_value: self.name,
             text_name,
+            grid: content,
+            warning_icon: Default::default(),
         };
 
         ctx.add_node(UiNode::new(item))

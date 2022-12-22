@@ -4,26 +4,24 @@ use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector2, Vector3},
         arrayvec::ArrayVec,
-        inspect::{Inspect, PropertyInfo},
         math::{
             aabb::AxisAlignedBoundingBox, ray::Ray, ray_rect_intersection, Rect, TriangleDefinition,
         },
-        parking_lot::Mutex,
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{prelude::*, PodVecView},
     },
     engine::resource_manager::ResourceManager,
-    material::Material,
+    material::SharedMaterial,
     resource::texture::{Texture, TextureKind, TexturePixelKind, TextureWrapMode},
     scene::{
         base::{Base, BaseBuilder},
         graph::Graph,
         mesh::{
             buffer::{TriangleBuffer, VertexBuffer},
-            surface::SurfaceData,
+            surface::{SurfaceData, SurfaceSharedData},
             vertex::StaticVertex,
         },
         node::{Node, NodeTrait, TypeUuidProvider, UpdateContext},
@@ -33,18 +31,17 @@ use std::{
     cell::Cell,
     cmp::Ordering,
     ops::{Deref, DerefMut},
-    sync::Arc,
 };
 
 /// Layers is a set of textures for rendering + mask texture to exclude some pixels from
 /// rendering. Terrain can have as many layers as you want, but each layer slightly decreases
 /// performance, so keep amount of layers on reasonable level (1 - 5 should be enough for most
 /// cases).
-#[derive(Default, Debug, Clone, Visit, Inspect, Reflect)]
+#[derive(Default, Debug, Clone, Visit, Reflect)]
 pub struct Layer {
     /// Material of the layer.
     #[reflect(hidden)]
-    pub material: Arc<Mutex<Material>>,
+    pub material: SharedMaterial,
 
     /// Name of the mask sampler in the material.
     ///
@@ -53,7 +50,6 @@ pub struct Layer {
     /// It will be used in the renderer to set appropriate chunk mask to the copy of the material.
     pub mask_property_name: String,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) chunk_masks: Vec<Texture>,
 }
@@ -62,7 +58,7 @@ impl PartialEq for Layer {
     fn eq(&self, other: &Self) -> bool {
         self.mask_property_name == other.mask_property_name
             && self.chunk_masks == other.chunk_masks
-            && Arc::ptr_eq(&self.material, &other.material)
+            && self.material == other.material
     }
 }
 
@@ -86,7 +82,7 @@ pub struct Chunk {
     length: f32,
     width_point_count: u32,
     length_point_count: u32,
-    surface_data: Arc<Mutex<SurfaceData>>,
+    surface_data: SurfaceSharedData,
     dirty: Cell<bool>,
 }
 
@@ -209,7 +205,7 @@ impl Chunk {
     }
 
     /// Returns data for rendering (vertex and index buffers).
-    pub fn data(&self) -> Arc<Mutex<SurfaceData>> {
+    pub fn data(&self) -> SurfaceSharedData {
         self.surface_data.clone()
     }
 
@@ -252,7 +248,7 @@ pub struct TerrainRayCastResult {
 /// are inheritable. You cannot inherit width, height, chunks and other things because these cannot
 /// be modified at runtime because changing width (for example) will invalidate the entire height
 /// map which makes runtime modification useless.  
-#[derive(Visit, Debug, Default, Inspect, Reflect, Clone)]
+#[derive(Visit, Debug, Default, Reflect, Clone)]
 pub struct Terrain {
     base: Base,
 
@@ -262,39 +258,36 @@ pub struct Terrain {
     #[reflect(setter = "set_decal_layer_index")]
     decal_layer_index: InheritableVariable<u8>,
 
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     width: f32,
 
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     length: f32,
 
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     mask_resolution: f32,
 
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     height_map_resolution: f32,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     chunks: Vec<Chunk>,
 
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     width_chunks: u32,
 
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     #[reflect(hidden)]
     length_chunks: u32,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     bounding_box_dirty: Cell<bool>,
 
-    #[inspect(skip)]
     #[reflect(hidden)]
     bounding_box: Cell<AxisAlignedBoundingBox>,
 }
@@ -366,7 +359,7 @@ impl Terrain {
     /// for example iff a decal has index == 0 and a mesh has index == 0, then decals will
     /// be applied. This allows you to apply decals only on needed surfaces.
     pub fn set_decal_layer_index(&mut self, index: u8) -> u8 {
-        self.decal_layer_index.set(index)
+        self.decal_layer_index.set_value_and_mark_modified(index)
     }
 
     /// Returns current decal index.
@@ -418,7 +411,7 @@ impl Terrain {
 
                 for (chunk_index, chunk) in self.chunks.iter_mut().enumerate() {
                     let chunk_position = chunk.local_position();
-                    let layer = &mut self.layers.get_mut()[layer];
+                    let layer = &mut self.layers.get_value_mut_and_mark_modified()[layer];
                     let mut texture_data = layer.chunk_masks[chunk_index].data_ref();
                     let mut texture_data_mut = texture_data.modify();
 
@@ -447,7 +440,7 @@ impl Terrain {
                             if brush.shape.contains(center, pixel_position) {
                                 // We can draw on mask directly, without any problems because it has R8 pixel format.
                                 let data = texture_data_mut.data_mut();
-                                let pixel = &mut data[(z * texture_width + x) as usize];
+                                let pixel = &mut data[z * texture_width + x];
                                 *pixel = (*pixel as f32 + k * alpha * 255.0).min(255.0) as u8;
                             }
                         }
@@ -564,7 +557,7 @@ impl Terrain {
 
     /// Sets new terrain layers.
     pub fn set_layers(&mut self, layers: Vec<Layer>) -> Vec<Layer> {
-        self.layers.set(layers)
+        self.layers.set_value_and_mark_modified(layers)
     }
 
     /// Returns a reference to a slice with layers of the terrain.
@@ -574,36 +567,38 @@ impl Terrain {
 
     /// Returns a mutable reference to a slice with layers of the terrain.
     pub fn layers_mut(&mut self) -> &mut [Layer] {
-        self.layers.get_mut()
+        self.layers.get_value_mut_and_mark_modified()
     }
 
     /// Adds new layer to the chunk. It is possible to have different layer count per chunk
     /// in the same terrain, however it seems to not have practical usage, so try to keep
     /// equal layer count per each chunk in your terrains.
     pub fn add_layer(&mut self, layer: Layer) {
-        self.layers.get_mut().push(layer);
+        self.layers.get_value_mut_and_mark_modified().push(layer);
     }
 
     /// Removes given layers from the terrain.
     pub fn remove_layer(&mut self, layer: usize) -> Layer {
-        self.layers.get_mut().remove(layer)
+        self.layers.get_value_mut_and_mark_modified().remove(layer)
     }
 
     /// Tries to remove last layer from the terrain.
     pub fn pop_layer(&mut self) -> Option<Layer> {
-        self.layers.get_mut().pop()
+        self.layers.get_value_mut_and_mark_modified().pop()
     }
 
     /// Inserts new layer at given position in the terrain.
     pub fn insert_layer(&mut self, layer: Layer, index: usize) {
-        self.layers.get_mut().insert(index, layer)
+        self.layers
+            .get_value_mut_and_mark_modified()
+            .insert(index, layer)
     }
 
     /// Creates new layer with given parameters, but does **not** add it to the terrain.
     pub fn create_layer(
         &self,
         value: u8,
-        material: Arc<Mutex<Material>>,
+        material: SharedMaterial,
         mask_property_name: String,
     ) -> Layer {
         Layer {
@@ -681,7 +676,7 @@ impl NodeTrait for Terrain {
 }
 
 /// Shape of a brush.
-#[derive(Copy, Clone, Inspect, Reflect, Debug)]
+#[derive(Copy, Clone, Reflect, Debug)]
 pub enum BrushShape {
     /// Circle with given radius.
     Circle {
@@ -713,7 +708,7 @@ impl BrushShape {
 }
 
 /// Paint mode of a brush. It defines operation that will be performed on the terrain.
-#[derive(Clone, PartialEq, PartialOrd, Inspect, Reflect, Debug)]
+#[derive(Clone, PartialEq, PartialOrd, Reflect, Debug)]
 pub enum BrushMode {
     /// Modifies height map.
     ModifyHeightMap {
@@ -731,10 +726,10 @@ pub enum BrushMode {
 }
 
 /// Brush is used to modify terrain. It supports multiple shapes and modes.
-#[derive(Clone, Inspect, Reflect, Debug)]
+#[derive(Clone, Reflect, Debug)]
 pub struct Brush {
     /// Center of the brush.
-    #[inspect(skip)]
+    #[reflect(hidden)]
     pub center: Vector3<f32>,
     /// Shape of the brush.
     pub shape: BrushShape,
@@ -745,7 +740,7 @@ pub struct Brush {
 /// Layer definition for a terrain builder.
 pub struct LayerDefinition {
     /// Material of the layer.
-    pub material: Arc<Mutex<Material>>,
+    pub material: SharedMaterial,
 
     /// Name of the mask sampler in the material. It should be `maskTexture` if standard material shader
     /// is used.
@@ -795,12 +790,12 @@ fn create_layer_mask(width: u32, height: u32, value: u8) -> Texture {
     mask
 }
 
-fn make_surface_data() -> Arc<Mutex<SurfaceData>> {
-    Arc::new(Mutex::new(SurfaceData::new(
+fn make_surface_data() -> SurfaceSharedData {
+    SurfaceSharedData::new(SurfaceData::new(
         VertexBuffer::new::<StaticVertex>(0, StaticVertex::layout(), vec![]).unwrap(),
         TriangleBuffer::default(),
         false,
-    )))
+    ))
 }
 
 impl TerrainBuilder {

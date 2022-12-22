@@ -6,10 +6,9 @@
 use crate::{
     core::{
         color::Color,
-        inspect::{Inspect, PropertyInfo},
         math::{aabb::AxisAlignedBoundingBox, Rect},
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::prelude::*,
@@ -60,10 +59,12 @@ use std::ops::{Deref, DerefMut};
 ///     },
 /// };
 /// use std::sync::Arc;
+/// use fyrox::material::SharedMaterial;
+/// use fyrox::scene::mesh::surface::SurfaceSharedData;
 ///
 /// fn create_rect_with_custom_material(
 ///     graph: &mut Graph,
-///     material: Arc<Mutex<Material>>,
+///     material: SharedMaterial,
 /// ) -> Handle<Node> {
 ///     MeshBuilder::new(
 ///         BaseBuilder::new().with_local_transform(
@@ -72,9 +73,9 @@ use std::ops::{Deref, DerefMut};
 ///                 .build(),
 ///         ),
 ///     )
-///     .with_surfaces(vec![SurfaceBuilder::new(Arc::new(Mutex::new(
+///     .with_surfaces(vec![SurfaceBuilder::new(SurfaceSharedData::new(
 ///         SurfaceData::make_quad(&Matrix4::identity()),
-///     )))
+///     ))
 ///     .with_material(material)
 ///     .build()])
 ///     .with_render_path(RenderPath::Forward)
@@ -98,7 +99,7 @@ use std::ops::{Deref, DerefMut};
 /// image, but just changing portion for rendering. Keep in mind that the coordinates are normalized
 /// which means `[0; 0]` corresponds to top-left corner of the texture and `[1; 1]` corresponds to
 /// right-bottom corner.
-#[derive(Visit, Inspect, Reflect, Debug, Clone)]
+#[derive(Visit, Reflect, Debug, Clone)]
 pub struct Rectangle {
     base: Base,
 
@@ -158,7 +159,7 @@ impl Rectangle {
 
     /// Sets new texture for the rectangle.
     pub fn set_texture(&mut self, texture: Option<Texture>) -> Option<Texture> {
-        self.texture.set(texture)
+        self.texture.set_value_and_mark_modified(texture)
     }
 
     /// Returns current color of the rectangle.
@@ -168,7 +169,7 @@ impl Rectangle {
 
     /// Sets color of the rectangle.
     pub fn set_color(&mut self, color: Color) -> Color {
-        self.color.set(color)
+        self.color.set_value_and_mark_modified(color)
     }
 
     /// Returns a rectangle that defines the region in texture which will be rendered. The coordinates are normalized
@@ -187,7 +188,7 @@ impl Rectangle {
     ///
     /// The default value is `(0, 0, 1, 1)` rectangle which corresponds to entire texture.
     pub fn set_uv_rect(&mut self, uv_rect: Rect<f32>) -> Rect<f32> {
-        self.uv_rect.set(uv_rect)
+        self.uv_rect.set_value_and_mark_modified(uv_rect)
     }
 }
 

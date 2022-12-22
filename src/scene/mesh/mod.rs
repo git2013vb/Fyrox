@@ -11,10 +11,9 @@
 use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector3},
-        inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
@@ -51,7 +50,6 @@ pub mod vertex;
     Hash,
     Debug,
     Visit,
-    Inspect,
     Reflect,
     AsRefStr,
     EnumString,
@@ -86,7 +84,7 @@ impl RenderPath {
 }
 
 /// See module docs.
-#[derive(Debug, Inspect, Reflect, Clone, Visit)]
+#[derive(Debug, Reflect, Clone, Visit)]
 pub struct Mesh {
     #[visit(rename = "Common")]
     base: Base,
@@ -100,19 +98,16 @@ pub struct Mesh {
     #[reflect(setter = "set_decal_layer_index")]
     decal_layer_index: InheritableVariable<u8>,
 
-    #[inspect(skip)]
-    #[visit(skip)]
     #[reflect(hidden)]
+    #[visit(skip)]
     local_bounding_box: Cell<AxisAlignedBoundingBox>,
 
-    #[inspect(skip)]
-    #[visit(skip)]
     #[reflect(hidden)]
+    #[visit(skip)]
     local_bounding_box_dirty: Cell<bool>,
 
-    #[inspect(skip)]
-    #[visit(skip)]
     #[reflect(hidden)]
+    #[visit(skip)]
     world_bounding_box: Cell<AxisAlignedBoundingBox>,
 }
 
@@ -153,7 +148,7 @@ impl TypeUuidProvider for Mesh {
 impl Mesh {
     /// Sets surfaces for the mesh.
     pub fn set_surfaces(&mut self, surfaces: Vec<Surface>) -> Vec<Surface> {
-        self.surfaces.set(surfaces)
+        self.surfaces.set_value_and_mark_modified(surfaces)
     }
 
     /// Returns shared reference to array of surfaces.
@@ -166,26 +161,28 @@ impl Mesh {
     #[inline]
     pub fn surfaces_mut(&mut self) -> &mut [Surface] {
         self.local_bounding_box_dirty.set(true);
-        self.surfaces.get_mut_silent()
+        self.surfaces.get_value_mut_silent()
     }
 
     /// Removes all surfaces from mesh.
     #[inline]
     pub fn clear_surfaces(&mut self) {
-        self.surfaces.get_mut().clear();
+        self.surfaces.get_value_mut_and_mark_modified().clear();
         self.local_bounding_box_dirty.set(true);
     }
 
     /// Adds new surface into mesh, can be used to procedurally generate meshes.
     #[inline]
     pub fn add_surface(&mut self, surface: Surface) {
-        self.surfaces.get_mut().push(surface);
+        self.surfaces
+            .get_value_mut_and_mark_modified()
+            .push(surface);
         self.local_bounding_box_dirty.set(true);
     }
 
     /// Sets new render path for the mesh.
     pub fn set_render_path(&mut self, render_path: RenderPath) -> RenderPath {
-        self.render_path.set(render_path)
+        self.render_path.set_value_and_mark_modified(render_path)
     }
 
     /// Returns current render path of the mesh.
@@ -255,7 +252,7 @@ impl Mesh {
     /// for example iff a decal has index == 0 and a mesh has index == 0, then decals will
     /// be applied. This allows you to apply decals only on needed surfaces.
     pub fn set_decal_layer_index(&mut self, index: u8) -> u8 {
-        self.decal_layer_index.set(index)
+        self.decal_layer_index.set_value_and_mark_modified(index)
     }
 
     /// Returns current decal index.

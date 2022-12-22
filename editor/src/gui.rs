@@ -1,5 +1,5 @@
 use fyrox::{
-    core::{algebra::Vector2, color::Color, pool::Handle},
+    core::{color::Color, pool::Handle},
     gui::{
         border::BorderBuilder,
         brush::Brush,
@@ -7,18 +7,40 @@ use fyrox::{
         decorator::DecoratorBuilder,
         define_constructor,
         draw::SharedTexture,
-        formatted_text::WrapMode,
         image::ImageBuilder,
         message::{MessageDirection, UiMessage},
         text::TextBuilder,
+        utils::make_simple_tooltip,
         widget::WidgetBuilder,
         BuildContext, HorizontalAlignment, Thickness, UiNode, VerticalAlignment,
     },
 };
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetItemMessage {
     Select(bool),
+}
+
+pub fn make_dropdown_list_option_universal<T: 'static>(
+    ctx: &mut BuildContext,
+    name: &str,
+    height: f32,
+    user_data: T,
+) -> Handle<UiNode> {
+    DecoratorBuilder::new(BorderBuilder::new(
+        WidgetBuilder::new()
+            .with_height(height)
+            .with_user_data(Rc::new(user_data))
+            .with_child(
+                TextBuilder::new(WidgetBuilder::new())
+                    .with_vertical_text_alignment(VerticalAlignment::Center)
+                    .with_horizontal_text_alignment(HorizontalAlignment::Center)
+                    .with_text(name)
+                    .build(ctx),
+            ),
+    ))
+    .build(ctx)
 }
 
 pub fn make_dropdown_list_option(ctx: &mut BuildContext, name: &str) -> Handle<UiNode> {
@@ -64,22 +86,7 @@ pub fn make_image_button_with_tooltip(
 ) -> Handle<UiNode> {
     ButtonBuilder::new(
         WidgetBuilder::new()
-            .with_tooltip(
-                BorderBuilder::new(
-                    WidgetBuilder::new()
-                        .with_max_size(Vector2::new(300.0, f32::MAX))
-                        .with_visibility(false)
-                        .with_child(
-                            TextBuilder::new(
-                                WidgetBuilder::new().with_margin(Thickness::uniform(2.0)),
-                            )
-                            .with_wrap(WrapMode::Word)
-                            .with_text(tooltip)
-                            .build(ctx),
-                        ),
-                )
-                .build(ctx),
-            )
+            .with_tooltip(make_simple_tooltip(ctx, tooltip))
             .with_margin(Thickness::uniform(1.0)),
     )
     .with_content(

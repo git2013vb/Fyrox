@@ -2,11 +2,7 @@
 
 use crate::{
     core::{
-        define_is_as,
-        inspect::{Inspect, PropertyInfo},
-        pool::Handle,
-        reflect::Reflect,
-        variable::InheritableVariable,
+        define_is_as, pool::Handle, reflect::prelude::*, variable::InheritableVariable,
         visitor::prelude::*,
     },
     define_with,
@@ -22,7 +18,7 @@ use strum_macros::{AsRefStr, EnumString, EnumVariantNames};
 const DEFAULT_FC: f32 = 0.25615; // 11296 Hz at 44100 Hz sample rate
 
 /// Effect input allows you to setup a source of samples for an effect with an optional filtering.
-#[derive(Visit, Inspect, Reflect, Debug, Default, Clone, PartialEq)]
+#[derive(Visit, Reflect, Debug, Default, Clone, PartialEq)]
 pub struct EffectInput {
     /// A sound node that will be the source of samples for the effect.
     pub sound: Handle<Node>,
@@ -31,7 +27,7 @@ pub struct EffectInput {
 }
 
 /// Base effect contains common properties for every effect (gain, inputs, etc.)
-#[derive(Visit, Inspect, Reflect, Debug, Clone)]
+#[derive(Visit, Reflect, Debug, Clone)]
 pub struct BaseEffect {
     #[reflect(setter = "set_name_internal")]
     pub(crate) name: InheritableVariable<String>,
@@ -43,7 +39,6 @@ pub struct BaseEffect {
     pub(crate) inputs: InheritableVariable<Vec<EffectInput>>,
 
     #[visit(skip)]
-    #[inspect(skip)]
     #[reflect(hidden)]
     pub(crate) native: Cell<Handle<fyrox_sound::effects::Effect>>,
 }
@@ -56,12 +51,12 @@ impl BaseEffect {
 
     /// Sets master gain of the effect.
     pub fn set_gain(&mut self, gain: f32) -> f32 {
-        self.gain.set(gain)
+        self.gain.set_value_and_mark_modified(gain)
     }
 
     /// Sets new inputs for the effect.
     pub fn set_inputs(&mut self, inputs: Vec<EffectInput>) -> Vec<EffectInput> {
-        self.inputs.set(inputs)
+        self.inputs.set_value_and_mark_modified(inputs)
     }
 
     /// Returns shared reference to the inputs array.
@@ -71,7 +66,7 @@ impl BaseEffect {
 
     /// Returns mutable reference to the inputs array.
     pub fn inputs_mut(&mut self) -> &mut Vec<EffectInput> {
-        self.inputs.get_mut()
+        self.inputs.get_value_mut_and_mark_modified()
     }
 
     /// Returns shared reference to the current name of the effect.
@@ -81,7 +76,7 @@ impl BaseEffect {
 
     /// Returns current name of the effect.
     pub fn name_owned(&self) -> String {
-        self.name.get().clone()
+        self.name.get_value_ref().clone()
     }
 
     /// Sets new name of the effect.
@@ -90,7 +85,7 @@ impl BaseEffect {
     }
 
     fn set_name_internal(&mut self, name: String) -> String {
-        self.name.set(name)
+        self.name.set_value_and_mark_modified(name)
     }
 }
 
@@ -106,7 +101,7 @@ impl Default for BaseEffect {
 }
 
 /// All possible effects in the engine.
-#[derive(Visit, Reflect, Inspect, Debug, AsRefStr, EnumString, EnumVariantNames, Clone)]
+#[derive(Visit, Reflect, Debug, AsRefStr, EnumString, EnumVariantNames, Clone)]
 pub enum Effect {
     /// See [`ReverbEffect`] docs.
     Reverb(ReverbEffect),
@@ -190,7 +185,7 @@ impl BaseEffectBuilder {
 }
 
 /// Reverb effect gives you multiple echoes.
-#[derive(Visit, Inspect, Reflect, Debug, Clone)]
+#[derive(Visit, Reflect, Debug, Clone)]
 pub struct ReverbEffect {
     pub(crate) base: BaseEffect,
 
@@ -237,7 +232,7 @@ impl ReverbEffect {
     /// Sets how much of input signal should be passed to output without any processing.
     /// Default value is 1.0.
     pub fn set_dry(&mut self, dry: f32) -> f32 {
-        self.dry.set(dry.min(1.0).max(0.0))
+        self.dry.set_value_and_mark_modified(dry.clamp(0.0, 1.0))
     }
 
     /// Returns dry part.
@@ -251,7 +246,7 @@ impl ReverbEffect {
     /// 0.5 - left is (left + right) * 0.5, right is (left + right) * 0.5
     /// and so on.
     pub fn set_wet(&mut self, wet: f32) -> f32 {
-        self.wet.set(wet.min(1.0).max(0.0))
+        self.wet.set_value_and_mark_modified(wet.clamp(0.0, 1.0))
     }
 
     /// Returns stereo mixing coefficient.
@@ -262,7 +257,7 @@ impl ReverbEffect {
     /// Sets desired duration of reverberation, the more size your environment has,
     /// the larger duration of reverberation should be.
     pub fn set_decay_time(&mut self, decay_time: f32) -> f32 {
-        self.decay_time.set(decay_time)
+        self.decay_time.set_value_and_mark_modified(decay_time)
     }
 
     /// Returns current decay time.
@@ -282,7 +277,7 @@ impl ReverbEffect {
     /// frequency in hertz by sample rate of sound context. Context has `normalize_frequency` method
     /// exactly for this purpose.
     pub fn set_fc(&mut self, fc: f32) -> f32 {
-        self.fc.set(fc)
+        self.fc.set_value_and_mark_modified(fc)
     }
 
     /// Returns cutoff frequency of lowpass filter in comb filters.

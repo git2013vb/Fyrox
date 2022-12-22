@@ -11,6 +11,7 @@
 extern crate lazy_static;
 
 mod absm;
+mod animation;
 mod asset;
 mod audio;
 mod build;
@@ -35,6 +36,7 @@ mod world;
 
 use crate::{
     absm::AbsmEditor,
+    animation::AnimationEditor,
     asset::{item::AssetItem, item::AssetKind, AssetBrowser},
     audio::AudioPanel,
     build::BuildWindow,
@@ -61,7 +63,9 @@ use crate::{
             graph::AddModelCommand, make_delete_selection_command, mesh::SetMeshTextureCommand,
             ChangeSelectionCommand, CommandGroup, PasteCommand, SceneCommand, SceneContext,
         },
-        is_scene_needs_to_be_saved, EditorScene, Selection,
+        is_scene_needs_to_be_saved,
+        settings::SceneSettingsWindow,
+        EditorScene, Selection,
     },
     scene_viewer::SceneViewer,
     settings::{camera::SceneCameraSettings, Settings},
@@ -73,7 +77,6 @@ use fyrox::{
         algebra::{Matrix3, Vector2},
         color::Color,
         futures::executor::block_on,
-        parking_lot::Mutex,
         pool::{ErasedHandle, Handle},
         scope_profile,
         sstorage::ImmutableString,
@@ -98,6 +101,7 @@ use fyrox::{
         window::{WindowBuilder, WindowMessage, WindowTitle},
         BuildContext, UiNode, UserInterface, VerticalAlignment,
     },
+    material::SharedMaterial,
     material::{shader::Shader, Material, PropertyValue},
     plugin::PluginConstructor,
     resource::texture::{CompressionOptions, Texture, TextureKind},
@@ -153,7 +157,7 @@ lazy_static! {
     };
 }
 
-pub fn make_color_material(color: Color) -> Arc<Mutex<Material>> {
+pub fn make_color_material(color: Color) -> SharedMaterial {
     let mut material = Material::from_shader(GIZMO_SHADER.clone(), None);
     material
         .set_property(
@@ -161,7 +165,7 @@ pub fn make_color_material(color: Color) -> Arc<Mutex<Material>> {
             PropertyValue::Color(color),
         )
         .unwrap();
-    Arc::new(Mutex::new(material))
+    SharedMaterial::new(material)
 }
 
 pub fn set_mesh_diffuse_color(mesh: &mut Mesh, color: Color) {
@@ -177,7 +181,7 @@ pub fn set_mesh_diffuse_color(mesh: &mut Mesh, color: Color) {
     }
 }
 
-pub fn create_terrain_layer_material() -> Arc<Mutex<Material>> {
+pub fn create_terrain_layer_material() -> SharedMaterial {
     let mut material = Material::standard_terrain();
     material
         .set_property(
@@ -185,7 +189,7 @@ pub fn create_terrain_layer_material() -> Arc<Mutex<Material>> {
             PropertyValue::Vector2(Vector2::new(10.0, 10.0)),
         )
         .unwrap();
-    Arc::new(Mutex::new(material))
+    SharedMaterial::new(material)
 }
 
 #[derive(Debug)]
@@ -213,7 +217,9 @@ pub enum Message {
         force: bool,
     },
     OpenSettings,
-    OpenMaterialEditor(Arc<Mutex<Material>>),
+    OpenAnimationEditor,
+    OpenAbsmEditor,
+    OpenMaterialEditor(SharedMaterial),
     ShowInAssetBrowser(PathBuf),
     SetWorldViewerFilter(String),
     LocateObject {
@@ -237,6 +243,7 @@ pub enum Message {
         view: Handle<UiNode>,
         handle: Handle<Node>,
     },
+    ForceSync,
 }
 
 impl Message {
@@ -473,6 +480,8 @@ pub struct Editor {
     mode: Mode,
     build_window: BuildWindow,
     build_profile: BuildProfile,
+    scene_settings: SceneSettingsWindow,
+    animation_editor: AnimationEditor,
 }
 
 impl Editor {
@@ -522,7 +531,7 @@ impl Editor {
 
         engine.user_interface.default_font.set(
             Font::from_memory(
-                include_bytes!("../resources/embed/arial.ttf").to_vec(),
+                include_bytes!("../resources/embed/arial.ttf").as_slice(),
                 14.0,
                 Font::default_char_set(),
             )
@@ -574,6 +583,8 @@ impl Editor {
         let command_stack_viewer = CommandStackViewer::new(ctx, message_sender.clone());
         let log = LogPanel::new(ctx, log_message_receiver);
         let inspector = Inspector::new(ctx, message_sender.clone());
+        let animation_editor = AnimationEditor::new(ctx);
+        let absm_editor = AbsmEditor::new(ctx, message_sender.clone());
 
         let root_grid = GridBuilder::new(
             WidgetBuilder::new()
@@ -661,7 +672,17 @@ impl Editor {
                                                                                 ),
                                                                             )
                                                                             .build(ctx),
-                                                                            audio_panel.window,
+                                                                            TileBuilder::new(
+                                                                                WidgetBuilder::new(
+                                                                                ),
+                                                                            )
+                                                                            .with_content(
+                                                                                TileContent::Window(
+                                                                                    audio_panel
+                                                                                        .window,
+                                                                                ),
+                                                                            )
+                                                                            .build(ctx),
                                                                         ],
                                                                     },
                                                                 )
@@ -676,6 +697,7 @@ impl Editor {
                             })
                             .build(ctx)
                     }))
+                    .with_floating_windows(vec![animation_editor.window, absm_editor.window])
                     .build(ctx),
                 ),
         )
@@ -715,11 +737,12 @@ impl Editor {
 
         let build_window = BuildWindow::new(ctx);
 
-        let absm_editor = AbsmEditor::new(&mut engine, message_sender.clone());
+        let scene_settings = SceneSettingsWindow::new(ctx, message_sender.clone());
 
         let material_editor = MaterialEditor::new(&mut engine);
 
         let mut editor = Self {
+            animation_editor,
             engine,
             navmesh_panel,
             scene_viewer,
@@ -756,6 +779,7 @@ impl Editor {
             absm_editor,
             build_window,
             build_profile: BuildProfile::Debug,
+            scene_settings,
         };
 
         editor.set_interaction_mode(Some(InteractionModeKind::Move));
@@ -1058,7 +1082,6 @@ impl Editor {
 
         let engine = &mut self.engine;
 
-        self.absm_editor.handle_ui_message(message, engine);
         self.save_scene_dialog.handle_ui_message(
             message,
             &self.message_sender,
@@ -1083,6 +1106,8 @@ impl Editor {
                     curve_editor: &self.curve_editor,
                     absm_editor: &self.absm_editor,
                     command_stack_panel: self.command_stack_viewer.window,
+                    scene_settings: &self.scene_settings,
+                    animation_editor: &self.animation_editor,
                 },
                 settings: &mut self.settings,
             },
@@ -1110,10 +1135,21 @@ impl Editor {
             &self.settings,
             &self.mode,
         );
+        self.animation_editor.handle_ui_message(
+            message,
+            self.scene.as_ref(),
+            engine,
+            &self.message_sender,
+        );
 
         if let Some(editor_scene) = self.scene.as_mut() {
+            self.absm_editor
+                .handle_ui_message(message, engine, &self.message_sender, editor_scene);
             self.audio_panel
                 .handle_ui_message(message, editor_scene, &self.message_sender, engine);
+
+            self.scene_settings
+                .handle_ui_message(message, &self.message_sender);
 
             self.navmesh_panel.handle_message(
                 message,
@@ -1318,6 +1354,9 @@ impl Editor {
             .sync_to_model(self.scene.as_ref(), &mut engine.user_interface);
 
         if let Some(editor_scene) = self.scene.as_mut() {
+            self.animation_editor.sync_to_model(editor_scene, engine);
+            self.absm_editor.sync_to_model(editor_scene, engine);
+            self.scene_settings.sync_to_model(editor_scene, engine);
             self.scene_viewer.sync_to_model(editor_scene, engine);
             self.inspector.sync_to_model(editor_scene, engine);
             self.navmesh_panel.sync_to_model(editor_scene, engine);
@@ -1450,6 +1489,11 @@ impl Editor {
     fn save_current_scene(&mut self, path: PathBuf) {
         let engine = &mut self.engine;
         if let Some(editor_scene) = self.scene.as_mut() {
+            self.animation_editor
+                .try_leave_preview_mode(editor_scene, engine);
+            self.absm_editor
+                .try_leave_preview_mode(editor_scene, engine);
+
             match editor_scene.save(path.clone(), engine) {
                 Ok(message) => {
                     self.scene_viewer.set_title(
@@ -1604,7 +1648,7 @@ impl Editor {
         }
     }
 
-    fn open_material_editor(&mut self, material: Arc<Mutex<Material>>) {
+    fn open_material_editor(&mut self, material: SharedMaterial) {
         let engine = &mut self.engine;
 
         self.material_editor.set_material(Some(material), engine);
@@ -1678,10 +1722,13 @@ impl Editor {
             _ => {}
         }
 
-        self.absm_editor.update(&mut self.engine);
         self.log.update(&mut self.engine);
         self.material_editor.update(&mut self.engine);
         self.asset_browser.update(&mut self.engine);
+
+        if let Some(scene) = self.scene.as_ref() {
+            self.animation_editor.update(scene, &self.engine);
+        }
 
         let mut iterations = 1;
         while iterations > 0 {
@@ -1701,8 +1748,19 @@ impl Editor {
                     .handle_message(&message, &self.message_sender);
 
                 if let Some(editor_scene) = self.scene.as_ref() {
-                    self.inspector
-                        .handle_message(&message, editor_scene, &mut self.engine);
+                    self.inspector.handle_message(
+                        &message,
+                        editor_scene,
+                        &mut self.engine,
+                        &self.message_sender,
+                    );
+                }
+
+                if let Some(scene) = self.scene.as_ref() {
+                    self.animation_editor
+                        .handle_message(&message, scene, &mut self.engine);
+                    self.absm_editor
+                        .handle_message(&message, scene, &mut self.engine);
                 }
 
                 self.scene_viewer.handle_message(&message, &mut self.engine);
@@ -1809,6 +1867,13 @@ impl Editor {
                             );
                         }
                     }
+                    Message::ForceSync => {
+                        needs_sync = true;
+                    }
+                    Message::OpenAnimationEditor => {
+                        self.animation_editor.open(&self.engine.user_interface);
+                    }
+                    Message::OpenAbsmEditor => self.absm_editor.open(&self.engine.user_interface),
                 }
             }
 
@@ -1826,6 +1891,8 @@ impl Editor {
         self.handle_resize();
 
         if let Some(editor_scene) = self.scene.as_mut() {
+            self.absm_editor.update(editor_scene, &mut self.engine);
+
             editor_scene.draw_auxiliary_geometry(&mut self.engine, &self.settings);
 
             let scene = &mut self.engine.scenes[editor_scene.scene];

@@ -24,9 +24,8 @@ use crate::{
     asset::{define_new_resource, Resource, ResourceData, ResourceState},
     core::{
         futures::io::Error,
-        inspect::{Inspect, PropertyInfo},
         io::{self, FileLoadError},
-        reflect::Reflect,
+        reflect::prelude::*,
         visitor::{PodVecView, Visit, VisitError, VisitResult, Visitor},
     },
     engine::resource_manager::options::ImportOptions,
@@ -35,6 +34,7 @@ use ddsfile::{Caps2, D3DFormat};
 use fxhash::FxHasher;
 use image::{imageops::FilterType, ColorType, DynamicImage, ImageError, ImageFormat};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::{
     borrow::Cow,
     fmt::{Debug, Formatter},
@@ -289,7 +289,7 @@ impl Default for TextureData {
 ///     compression: NoCompression,    
 /// )
 /// ```
-#[derive(Clone, Deserialize, Serialize, Inspect, Reflect)]
+#[derive(Clone, Deserialize, Serialize, Reflect)]
 pub struct TextureImportOptions {
     #[serde(default)]
     pub(crate) minification_filter: TextureMinificationFilter,
@@ -489,7 +489,6 @@ impl Texture {
     PartialEq,
     Deserialize,
     Serialize,
-    Inspect,
     Reflect,
     EnumVariantNames,
     EnumString,
@@ -525,7 +524,6 @@ impl Default for TextureMagnificationFilter {
     PartialEq,
     Deserialize,
     Serialize,
-    Inspect,
     Reflect,
     EnumVariantNames,
     EnumString,
@@ -595,7 +593,6 @@ impl Default for TextureMinificationFilter {
     PartialEq,
     Deserialize,
     Serialize,
-    Inspect,
     Reflect,
     EnumVariantNames,
     EnumString,
@@ -760,20 +757,35 @@ impl TexturePixelKind {
 }
 
 /// An error that may occur during texture operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum TextureError {
     /// Format (pixel format, dimensions) is not supported.
-    #[error("Unsupported format!")]
     UnsupportedFormat,
     /// An io error.
-    #[error("An i/o error has occurred: {0}")]
     Io(std::io::Error),
     /// Internal image crate error.
-    #[error("Image loading error {0}")]
     Image(image::ImageError),
     /// An error occurred during file loading.
-    #[error("A file load error has occurred {0:?}")]
     FileLoadError(FileLoadError),
+}
+
+impl Display for TextureError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TextureError::UnsupportedFormat => {
+                write!(f, "Unsupported format!")
+            }
+            TextureError::Io(v) => {
+                write!(f, "An i/o error has occurred: {v}")
+            }
+            TextureError::Image(v) => {
+                write!(f, "Image loading error {v}")
+            }
+            TextureError::FileLoadError(v) => {
+                write!(f, "A file load error has occurred {v:?}")
+            }
+        }
+    }
 }
 
 impl From<FileLoadError> for TextureError {
@@ -813,7 +825,6 @@ fn ceil_div_4(x: u32) -> u32 {
     PartialEq,
     Eq,
     Debug,
-    Inspect,
     Reflect,
     EnumVariantNames,
     EnumString,

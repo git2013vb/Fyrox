@@ -5,10 +5,9 @@
 use crate::{
     core::{
         color::Color,
-        inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
@@ -62,7 +61,7 @@ use std::ops::{Deref, DerefMut};
 ///         .build(graph)
 /// }
 /// ```
-#[derive(Debug, Inspect, Reflect, Clone, Visit)]
+#[derive(Debug, Reflect, Clone, Visit)]
 pub struct Sprite {
     base: Base,
 
@@ -72,7 +71,7 @@ pub struct Sprite {
     #[reflect(setter = "set_color")]
     color: InheritableVariable<Color>,
 
-    #[inspect(min_value = 0.0, step = 0.1)]
+    #[reflect(min_value = 0.0, step = 0.1)]
     #[reflect(setter = "set_size")]
     size: InheritableVariable<f32>,
 
@@ -112,7 +111,7 @@ impl Sprite {
     ///
     /// Negative values could be used to "inverse" the image on the sprite.
     pub fn set_size(&mut self, size: f32) -> f32 {
-        self.size.set(size)
+        self.size.set_value_and_mark_modified(size)
     }
 
     /// Returns current size of sprite.
@@ -122,7 +121,7 @@ impl Sprite {
 
     /// Sets new color of sprite. Default is White.
     pub fn set_color(&mut self, color: Color) -> Color {
-        self.color.set(color)
+        self.color.set_value_and_mark_modified(color)
     }
 
     /// Returns current color of sprite.
@@ -132,7 +131,7 @@ impl Sprite {
 
     /// Sets rotation around "look" axis in radians. Default is 0.0.
     pub fn set_rotation(&mut self, rotation: f32) -> f32 {
-        self.rotation.set(rotation)
+        self.rotation.set_value_and_mark_modified(rotation)
     }
 
     /// Returns rotation in radians.
@@ -142,7 +141,7 @@ impl Sprite {
 
     /// Sets new texture for sprite. Default is None.
     pub fn set_texture(&mut self, texture: Option<Texture>) -> Option<Texture> {
-        self.texture.set(texture)
+        self.texture.set_value_and_mark_modified(texture)
     }
 
     /// Returns current texture of sprite. Can be None if sprite has no texture.

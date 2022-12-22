@@ -8,15 +8,15 @@ use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector2, Vector3, Vector4},
         hash_combine,
-        inspect::{Inspect, PropertyInfo},
         math::TriangleDefinition,
-        parking_lot::Mutex,
+        parking_lot::{Mutex, MutexGuard},
         pool::{ErasedHandle, Handle},
-        reflect::Reflect,
+        reflect::prelude::*,
         sparse::AtomicIndex,
+        variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
     },
-    material::Material,
+    material::{Material, SharedMaterial},
     renderer::{cache::CacheEntry, framework},
     scene::{
         mesh::{
@@ -844,6 +844,17 @@ impl SurfaceData {
         self.geometry_buffer.modify().clear();
         self.vertex_buffer.modify().clear();
     }
+
+    /// Marks surface's content as procedural (created from code) or not. Content of procedural surfaces will
+    /// be serialized. It is useful if you need to save procedural surfaces to disk or some other storage.
+    pub fn set_procedural(&mut self, procedural: bool) {
+        self.is_procedural = procedural;
+    }
+
+    /// Returns `true` if surface's content was created from code (procedural), `false` - otherwise.
+    pub fn is_procedural(&self) -> bool {
+        self.is_procedural
+    }
 }
 
 impl Visit for SurfaceData {
@@ -939,52 +950,110 @@ impl VertexWeightSet {
     }
 }
 
-/// See module docs.
-#[derive(Debug, Clone, Inspect, Reflect, Visit)]
-pub struct Surface {
-    // Wrapped into option to be able to implement Default for serialization.
-    // In normal conditions it must never be None!
-    #[reflect(hidden)]
-    #[inspect(skip)]
-    data: Option<Arc<Mutex<SurfaceData>>>,
-    #[reflect(hidden)]
-    material: Arc<Mutex<Material>>,
-    /// Temporal array for FBX conversion needs, it holds skinning data (weight + bone handle)
-    /// and will be used to fill actual bone indices and weight in vertices that will be
-    /// sent to GPU. The idea is very simple: GPU needs to know only indices of matrices of
-    /// bones so we can use `bones` array as reference to get those indices. This could be done
-    /// like so: iterate over all vertices and weight data and calculate index of node handle that
-    /// associated with vertex in `bones` array and store it as bone index in vertex.
-    #[inspect(skip)]
-    #[visit(skip)]
-    #[reflect(hidden)]
-    pub vertex_weights: Vec<VertexWeightSet>,
-    /// Array of handle to scene nodes which are used as bones.
-    pub bones: Vec<Handle<Node>>,
+/// Surface shared data is a vertex and index buffer that can be shared across multiple objects. This is
+/// very useful memory optimization - you create a single data storage for a surface and then share it
+/// with any instance count you want. Memory usage does not increate with instance count in this case.
+#[derive(Default, Debug, Clone, Reflect)]
+pub struct SurfaceSharedData(#[reflect(hidden)] Arc<Mutex<SurfaceData>>);
+
+impl PartialEq for SurfaceSharedData {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
-impl PartialEq for Surface {
-    fn eq(&self, other: &Self) -> bool {
-        let data_equal = match (&self.data, &other.data) {
-            (Some(data), Some(other_data)) => Arc::ptr_eq(data, other_data),
-            (None, None) => true,
-            _ => false,
-        };
+impl Visit for SurfaceSharedData {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        self.0.visit(name, visitor)
+    }
+}
 
-        let material_equal = Arc::ptr_eq(&self.material, &other.material);
+impl SurfaceSharedData {
+    /// Creates new surface shared data.
+    pub fn new(data: SurfaceData) -> Self {
+        Self(Arc::new(Mutex::new(data)))
+    }
 
-        self.bones == other.bones
-            && self.vertex_weights == other.vertex_weights
-            && data_equal
-            && material_equal
+    /// Provides access to inner data.
+    pub fn lock(&self) -> MutexGuard<'_, SurfaceData> {
+        self.0.lock()
+    }
+
+    /// Returns unique numeric id of the surface shared data. The id is not stable across multiple runs of
+    /// your application!
+    pub fn key(&self) -> u64 {
+        &*self.0 as *const _ as u64
+    }
+
+    /// Creates a deep clone of the data.
+    pub fn deep_clone(&self) -> Self {
+        Self::new(self.lock().clone())
+    }
+
+    /// Returns total amount of uses of the shared data.
+    pub fn use_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+}
+
+/// See module docs.
+#[derive(Debug, Clone, Reflect, PartialEq)]
+pub struct Surface {
+    data: InheritableVariable<SurfaceSharedData>,
+
+    material: InheritableVariable<SharedMaterial>,
+
+    /// Array of handles to scene nodes which are used as bones.
+    pub bones: InheritableVariable<Vec<Handle<Node>>>,
+
+    // Temporal array for FBX conversion needs, it holds skinning data (weight + bone handle)
+    // and will be used to fill actual bone indices and weight in vertices that will be
+    // sent to GPU. The idea is very simple: GPU needs to know only indices of matrices of
+    // bones so we can use `bones` array as reference to get those indices. This could be done
+    // like so: iterate over all vertices and weight data and calculate index of node handle that
+    // associated with vertex in `bones` array and store it as bone index in vertex.
+    #[reflect(hidden)]
+    pub(crate) vertex_weights: Vec<VertexWeightSet>,
+}
+
+impl Visit for Surface {
+    fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
+        let mut region = visitor.enter_region(name)?;
+
+        if region.is_reading() {
+            // TODO: Remove in 0.30+.
+            if self.data.visit("Data", &mut region).is_err() {
+                let mut old_data: Option<SurfaceSharedData> = None;
+                old_data.visit("Data", &mut region)?;
+                self.data.set_value_silent(old_data.unwrap());
+            }
+
+            if self.material.visit("Material", &mut region).is_err() {
+                let mut old_material: SharedMaterial = Default::default();
+                old_material.visit("Material", &mut region)?;
+                self.material.set_value_silent(old_material);
+            }
+
+            if self.bones.visit("Bones", &mut region).is_err() {
+                let mut old_bones: Vec<Handle<Node>> = Default::default();
+                old_bones.visit("Bones", &mut region)?;
+                self.bones.set_value_silent(old_bones);
+            }
+        } else {
+            self.data.visit("Data", &mut region)?;
+            self.material.visit("Material", &mut region)?;
+            self.bones.visit("Bones", &mut region)?;
+        }
+
+        Ok(())
     }
 }
 
 impl Default for Surface {
     fn default() -> Self {
         Self {
-            data: None,
-            material: Arc::new(Mutex::new(Material::standard())),
+            data: SurfaceSharedData::new(SurfaceData::make_cube(Matrix4::identity())).into(),
+            material: SharedMaterial::new(Material::standard()).into(),
             vertex_weights: Default::default(),
             bones: Default::default(),
         }
@@ -994,40 +1063,40 @@ impl Default for Surface {
 impl Surface {
     /// Creates new surface instance with given data and without any texture.
     #[inline]
-    pub fn new(data: Arc<Mutex<SurfaceData>>) -> Self {
+    pub fn new(data: SurfaceSharedData) -> Self {
         Self {
-            data: Some(data),
+            data: data.into(),
             ..Default::default()
         }
     }
 
     /// Calculates material id.
     pub fn material_id(&self) -> u64 {
-        &*self.material as *const _ as u64
+        self.material.key()
     }
 
     /// Calculates batch id.
     pub fn batch_id(&self) -> u64 {
         let mut hasher = FxHasher::default();
         hasher.write_u64(self.material_id());
-        hasher.write_u64(&**self.data.as_ref().unwrap() as *const _ as u64);
+        hasher.write_u64(self.data.key());
         hasher.finish()
     }
 
     /// Returns current data used by surface.
     #[inline]
-    pub fn data(&self) -> Arc<Mutex<SurfaceData>> {
-        self.data.as_ref().unwrap().clone()
+    pub fn data(&self) -> SurfaceSharedData {
+        (*self.data).clone()
     }
 
     /// Returns current material of the surface.
-    pub fn material(&self) -> &Arc<Mutex<Material>> {
+    pub fn material(&self) -> &SharedMaterial {
         &self.material
     }
 
     /// Sets new material for the surface.
-    pub fn set_material(&mut self, material: Arc<Mutex<Material>>) {
-        self.material = material;
+    pub fn set_material(&mut self, material: SharedMaterial) {
+        self.material.set_value_and_mark_modified(material);
     }
 
     /// Returns list of bones that affects the surface.
@@ -1039,14 +1108,14 @@ impl Surface {
 
 /// Surface builder allows you to create surfaces in declarative manner.
 pub struct SurfaceBuilder {
-    data: Arc<Mutex<SurfaceData>>,
-    material: Option<Arc<Mutex<Material>>>,
+    data: SurfaceSharedData,
+    material: Option<SharedMaterial>,
     bones: Vec<Handle<Node>>,
 }
 
 impl SurfaceBuilder {
     /// Creates new builder instance with given data and no textures or bones.
-    pub fn new(data: Arc<Mutex<SurfaceData>>) -> Self {
+    pub fn new(data: SurfaceSharedData) -> Self {
         Self {
             data,
             material: None,
@@ -1055,7 +1124,7 @@ impl SurfaceBuilder {
     }
 
     /// Sets desired diffuse texture.
-    pub fn with_material(mut self, material: Arc<Mutex<Material>>) -> Self {
+    pub fn with_material(mut self, material: SharedMaterial) -> Self {
         self.material = Some(material);
         self
     }
@@ -1069,12 +1138,13 @@ impl SurfaceBuilder {
     /// Creates new instance of surface.
     pub fn build(self) -> Surface {
         Surface {
-            data: Some(self.data),
+            data: self.data.into(),
             material: self
                 .material
-                .unwrap_or_else(|| Arc::new(Mutex::new(Material::standard()))),
+                .unwrap_or_else(|| SharedMaterial::new(Material::standard()))
+                .into(),
             vertex_weights: Default::default(),
-            bones: self.bones,
+            bones: self.bones.into(),
         }
     }
 }

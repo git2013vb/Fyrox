@@ -9,10 +9,6 @@
 
 #![forbid(unsafe_code)]
 
-use crate::scene::light::directional::DirectionalLight;
-use crate::scene::light::point::PointLight;
-use crate::scene::light::spot::SpotLight;
-use crate::scene::mesh::Mesh;
 use crate::{
     asset::Resource,
     core::{
@@ -20,16 +16,17 @@ use crate::{
         arrayvec::ArrayVec,
         math::{self, ray::Ray, Matrix4Ext, Rect, TriangleDefinition, Vector2Ext},
         octree::{Octree, OctreeNode},
-        parking_lot::Mutex,
         pool::Handle,
         visitor::{Visit, VisitResult, Visitor},
     },
     engine::resource_manager::{ResourceManager, TextureRegistrationError},
     resource::texture::{Texture, TextureData, TextureKind, TexturePixelKind, TextureState},
     scene::{
+        light::{directional::DirectionalLight, point::PointLight, spot::SpotLight},
         mesh::{
             buffer::{VertexAttributeUsage, VertexFetchError, VertexReadTrait},
-            surface::SurfaceData,
+            surface::SurfaceSharedData,
+            Mesh,
         },
         node::Node,
         Scene,
@@ -38,6 +35,7 @@ use crate::{
 };
 use fxhash::FxHashMap;
 use rayon::prelude::*;
+use std::fmt::{Display, Formatter};
 use std::{
     ops::Deref,
     path::Path,
@@ -89,7 +87,7 @@ struct InstanceData {
 
 struct Instance {
     owner: Handle<Node>,
-    source_data: Arc<Mutex<SurfaceData>>,
+    source_data: SurfaceSharedData,
     data: Option<InstanceData>,
     transform: Matrix4<f32>,
 }
@@ -195,19 +193,30 @@ impl Deref for ProgressIndicator {
     type Target = ProgressData;
 
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        &self.0
     }
 }
 
 /// An error that may occur during ligthmap generation.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum LightmapGenerationError {
     /// Generation was cancelled by user.
-    #[error("Lightmap generation was cancelled by the user.")]
     Cancelled,
     /// Vertex buffer of a mesh lacks required data.
-    #[error("Vertex buffer of a mesh lacks required data {0}.")]
     InvalidData(VertexFetchError),
+}
+
+impl Display for LightmapGenerationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LightmapGenerationError::Cancelled => {
+                write!(f, "Lightmap generation was cancelled by the user.")
+            }
+            LightmapGenerationError::InvalidData(v) => {
+                write!(f, "Vertex buffer of a mesh lacks required data {v}.")
+            }
+        }
+    }
 }
 
 impl From<VertexFetchError> for LightmapGenerationError {
@@ -253,6 +262,10 @@ impl Lightmap {
         for (handle, light) in scene.graph.pair_iter() {
             if cancellation_token.is_cancelled() {
                 return Err(LightmapGenerationError::Cancelled);
+            }
+
+            if !light.is_globally_enabled() {
+                continue;
             }
 
             if let Some(point) = light.cast::<PointLight>() {
@@ -305,7 +318,7 @@ impl Lightmap {
 
         for (handle, node) in scene.graph.pair_iter() {
             if let Some(mesh) = node.cast::<Mesh>() {
-                if !mesh.global_visibility() {
+                if !mesh.global_visibility() || !mesh.is_globally_enabled() {
                     continue;
                 }
                 let global_transform = mesh.global_transform();
@@ -536,7 +549,7 @@ fn estimate_size(data: &InstanceData, texels_per_unit: u32) -> u32 {
 /// Calculates distance attenuation for a point using given distance to the point and
 /// radius of a light.
 fn distance_attenuation(distance: f32, sqr_radius: f32) -> f32 {
-    let attenuation = (1.0 - distance * distance / sqr_radius).max(0.0).min(1.0);
+    let attenuation = (1.0 - distance * distance / sqr_radius).clamp(0.0, 1.0);
     attenuation * attenuation
 }
 
@@ -652,7 +665,7 @@ fn lambertian(light_vec: Vector3<f32>, normal: Vector3<f32>) -> f32 {
 
 /// https://en.wikipedia.org/wiki/Smoothstep
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let k = ((x - edge0) / (edge1 - edge0)).max(0.0).min(1.0);
+    let k = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     k * k * (3.0 - 2.0 * k)
 }
 
@@ -763,9 +776,9 @@ fn generate_lightmap(
                 }
 
                 *pixel = Vector4::new(
-                    (pixel_color.x.max(0.0).min(1.0) * 255.0) as u8,
-                    (pixel_color.y.max(0.0).min(1.0) * 255.0) as u8,
-                    (pixel_color.z.max(0.0).min(1.0) * 255.0) as u8,
+                    (pixel_color.x.clamp(0.0, 1.0) * 255.0) as u8,
+                    (pixel_color.y.clamp(0.0, 1.0) * 255.0) as u8,
+                    (pixel_color.z.clamp(0.0, 1.0) * 255.0) as u8,
                     255, // Indicates that this pixel was "filled"
                 );
             }
@@ -849,9 +862,9 @@ fn generate_lightmap(
                     + south
                     + south_east;
 
-                bytes.push((sum.x / 9).max(0).min(255) as u8);
-                bytes.push((sum.y / 9).max(0).min(255) as u8);
-                bytes.push((sum.z / 9).max(0).min(255) as u8);
+                bytes.push((sum.x / 9).clamp(0, 255) as u8);
+                bytes.push((sum.y / 9).clamp(0, 255) as u8);
+                bytes.push((sum.z / 9).clamp(0, 255) as u8);
             }
         }
     }
@@ -872,11 +885,9 @@ fn generate_lightmap(
 
 #[cfg(test)]
 mod test {
+    use crate::scene::mesh::surface::SurfaceSharedData;
     use crate::{
-        core::{
-            algebra::{Matrix4, Vector3},
-            parking_lot::Mutex,
-        },
+        core::algebra::{Matrix4, Vector3},
         scene::{
             base::BaseBuilder,
             light::{point::PointLightBuilder, BaseLightBuilder},
@@ -889,7 +900,6 @@ mod test {
         },
         utils::lightmap::Lightmap,
     };
-    use std::sync::Arc;
 
     #[test]
     fn test_generate_lightmap() {
@@ -903,7 +913,9 @@ mod test {
         );
 
         MeshBuilder::new(BaseBuilder::new())
-            .with_surfaces(vec![SurfaceBuilder::new(Arc::new(Mutex::new(data))).build()])
+            .with_surfaces(vec![
+                SurfaceBuilder::new(SurfaceSharedData::new(data)).build()
+            ])
             .build(&mut scene.graph);
 
         PointLightBuilder::new(BaseLightBuilder::new(

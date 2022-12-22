@@ -24,10 +24,9 @@
 
 use crate::{
     core::{
-        inspect::{Inspect, PropertyInfo},
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
-        reflect::Reflect,
+        reflect::prelude::*,
         uuid::{uuid, Uuid},
         variable::InheritableVariable,
         visitor::{Visit, VisitResult, Visitor},
@@ -44,23 +43,23 @@ use crate::{
 use std::ops::{Deref, DerefMut};
 
 /// See module docs.
-#[derive(Debug, Inspect, Reflect, Clone, Visit)]
+#[derive(Debug, Reflect, Clone, Visit)]
 pub struct SpotLight {
     base_light: BaseLight,
 
-    #[inspect(min_value = 0.0, max_value = 3.14159, step = 0.1)]
+    #[reflect(min_value = 0.0, max_value = 3.14159, step = 0.1)]
     #[reflect(setter = "set_hotspot_cone_angle")]
     hotspot_cone_angle: InheritableVariable<f32>,
 
-    #[inspect(min_value = 0.0, step = 0.1)]
+    #[reflect(min_value = 0.0, step = 0.1)]
     #[reflect(setter = "set_falloff_angle_delta")]
     falloff_angle_delta: InheritableVariable<f32>,
 
-    #[inspect(min_value = 0.0, step = 0.001)]
+    #[reflect(min_value = 0.0, step = 0.001)]
     #[reflect(setter = "set_shadow_bias")]
     shadow_bias: InheritableVariable<f32>,
 
-    #[inspect(min_value = 0.0, step = 0.1)]
+    #[reflect(min_value = 0.0, step = 0.1)]
     #[reflect(setter = "set_distance")]
     distance: InheritableVariable<f32>,
 
@@ -121,13 +120,14 @@ impl SpotLight {
     /// Sets new value of hotspot angle of light.
     #[inline]
     pub fn set_hotspot_cone_angle(&mut self, cone_angle: f32) -> f32 {
-        self.hotspot_cone_angle.set(cone_angle.abs())
+        self.hotspot_cone_angle
+            .set_value_and_mark_modified(cone_angle.abs())
     }
 
     /// Sets new falloff angle range for spot light.
     #[inline]
     pub fn set_falloff_angle_delta(&mut self, delta: f32) -> f32 {
-        self.falloff_angle_delta.set(delta)
+        self.falloff_angle_delta.set_value_and_mark_modified(delta)
     }
 
     /// Returns falloff angle range of light.
@@ -145,7 +145,7 @@ impl SpotLight {
     /// Sets new shadow bias value. Bias will be used to offset fragment's depth before
     /// compare it with shadow map value, it is used to remove "shadow acne".
     pub fn set_shadow_bias(&mut self, bias: f32) -> f32 {
-        self.shadow_bias.set(bias)
+        self.shadow_bias.set_value_and_mark_modified(bias)
     }
 
     /// Returns current value of shadow bias.
@@ -157,7 +157,7 @@ impl SpotLight {
     /// of light will be calculated using inverse square root law.
     #[inline]
     pub fn set_distance(&mut self, distance: f32) -> f32 {
-        self.distance.set(distance.abs())
+        self.distance.set_value_and_mark_modified(distance.abs())
     }
 
     /// Returns maximum distance of light.
@@ -170,7 +170,7 @@ impl SpotLight {
     /// by the spot light.
     #[inline]
     pub fn set_cookie_texture(&mut self, texture: Option<Texture>) -> Option<Texture> {
-        self.cookie_texture.set(texture)
+        self.cookie_texture.set_value_and_mark_modified(texture)
     }
 
     /// Get cookie texture. Also called gobo this texture gets projected

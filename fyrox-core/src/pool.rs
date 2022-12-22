@@ -22,14 +22,14 @@
 
 #![allow(clippy::unneeded_field_pattern)]
 
+use crate::reflect::ReflectArray;
 use crate::{
-    inspect::{Inspect, PropertyInfo},
-    reflect::Reflect,
+    reflect::prelude::*,
     visitor::{Visit, VisitResult, Visitor},
 };
 use arrayvec::ArrayVec;
+use std::any::Any;
 use std::{
-    any::TypeId,
     fmt::{Debug, Display, Formatter},
     future::Future,
     hash::{Hash, Hasher},
@@ -104,6 +104,67 @@ where
     free_stack: Vec<u32>,
 }
 
+impl<T: Reflect> Reflect for Pool<T> {
+    fn fields_info(&self) -> Vec<FieldInfo> {
+        vec![]
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn as_reflect(&self) -> &dyn Reflect {
+        self
+    }
+
+    fn as_reflect_mut(&mut self) -> &mut dyn Reflect {
+        self
+    }
+
+    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
+        let this = std::mem::replace(self, value.take()?);
+        Ok(Box::new(this))
+    }
+
+    fn field(&self, _name: &str) -> Option<&dyn Reflect> {
+        None
+    }
+
+    fn field_mut(&mut self, _name: &str) -> Option<&mut dyn Reflect> {
+        None
+    }
+
+    fn as_array(&self) -> Option<&dyn ReflectArray> {
+        Some(self)
+    }
+
+    fn as_array_mut(&mut self) -> Option<&mut dyn ReflectArray> {
+        Some(self)
+    }
+}
+
+impl<T: Reflect> ReflectArray for Pool<T> {
+    fn reflect_index(&self, index: usize) -> Option<&dyn Reflect> {
+        self.at(index as u32).map(|p| p.as_reflect())
+    }
+
+    fn reflect_index_mut(&mut self, index: usize) -> Option<&mut dyn Reflect> {
+        self.at_mut(index as u32).map(|p| p.as_reflect_mut())
+    }
+
+    fn reflect_len(&self) -> usize {
+        self.get_capacity() as usize
+    }
+}
+
 impl<T: PartialEq> PartialEq for Pool<T> {
     fn eq(&self, other: &Self) -> bool {
         self.records == other.records
@@ -116,44 +177,15 @@ impl<T: PartialEq> PartialEq for Pool<T> {
 #[derive(Reflect)]
 pub struct Handle<T> {
     /// Index of object in pool.
+    #[reflect(read_only, description = "Index of an object in a pool.")]
     index: u32,
     /// Generation number, if it is same as generation of pool record at
     /// index of handle then this is valid handle.
+    #[reflect(read_only, description = "Generation of an object in a pool.")]
     generation: u32,
     /// Type holder.
     #[reflect(hidden)]
     type_marker: PhantomData<T>,
-}
-
-impl<T: 'static> Inspect for Handle<T> {
-    fn properties(&self) -> Vec<PropertyInfo<'_>> {
-        vec![
-            PropertyInfo {
-                owner_type_id: TypeId::of::<Self>(),
-                name: "index",
-                display_name: "Index",
-                value: &self.index,
-                read_only: true,
-                min_value: None,
-                max_value: None,
-                step: None,
-                precision: None,
-                description: "Index of an object in a pool.".to_string(),
-            },
-            PropertyInfo {
-                owner_type_id: TypeId::of::<Self>(),
-                name: "generation",
-                display_name: "Generation",
-                value: &self.generation,
-                read_only: true,
-                min_value: None,
-                max_value: None,
-                step: None,
-                precision: None,
-                description: "Generation of an object in a pool.".to_string(),
-            },
-        ]
-    }
 }
 
 unsafe impl<T> Send for Handle<T> {}
@@ -166,14 +198,14 @@ impl<T> Display for Handle<T> {
 }
 
 /// Type-erased handle.
-#[derive(Copy, Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Hash, Inspect, Reflect, Visit)]
+#[derive(Copy, Clone, Debug, Ord, PartialOrd, PartialEq, Eq, Hash, Reflect, Visit)]
 pub struct ErasedHandle {
     /// Index of object in pool.
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     index: u32,
     /// Generation number, if it is same as generation of pool record at
     /// index of handle then this is valid handle.
-    #[inspect(read_only)]
+    #[reflect(read_only)]
     generation: u32,
 }
 
